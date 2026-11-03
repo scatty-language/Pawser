@@ -809,6 +809,7 @@ lexer_scan_number :: proc(state: ^LexerState) {
 
             digit_count: int = 0
             has_malformed_underscore: bool = false
+            has_invalid_binary_digit: bool = false
             previous_was_underscore: bool = false
 
             if state.current_byte_offset < len(state.source_text) &&
@@ -846,6 +847,7 @@ lexer_scan_number :: proc(state: ^LexerState) {
                         state.current_byte_offset - invalid_digit_start,
                         "Invalid digit in binary literal.",
                     )
+                    has_invalid_binary_digit = true
                     break
                 } else {
                     break
@@ -856,7 +858,7 @@ lexer_scan_number :: proc(state: ^LexerState) {
                 has_malformed_underscore = true
             }
 
-            if has_malformed_underscore {
+            if has_malformed_underscore && !has_invalid_binary_digit {
                 lexer_record_diagnostic(
                     state,
                     .MalformedNumberLiteral,
@@ -945,7 +947,9 @@ lexer_scan_number :: proc(state: ^LexerState) {
                 }
             }
         }
-    } else if has_malformed_integer_underscore {
+    }
+
+    if !is_float && has_malformed_integer_underscore {
         lexer_record_diagnostic(
             state,
             .MalformedNumberLiteral,
