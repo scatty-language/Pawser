@@ -594,7 +594,7 @@ lexer_scan_escaped_keyword :: proc(state: ^LexerState) {
                 1,
                 "Malformed UTF-8 sequence inside escaped identifier.",
             )
-        state.current_byte_offset += 1
+            state.current_byte_offset += 1
         } else {
             state.current_byte_offset += sequence_length
         }
@@ -969,7 +969,7 @@ lexer_scan_number :: proc(state: ^LexerState) {
                     state.current_byte_offset - start_offset,
                     "Floating-point exponent requires decimal point.",
                 )
-            is_float = true
+                is_float = true
             }
             state.current_byte_offset += 1 // Consume e / E
             if state.current_byte_offset < len(state.source_text) {
@@ -1125,17 +1125,17 @@ lexer_scan_escape_sequence :: proc(
         byte_value: u8 = u8(accumulated_value)
         if in_character_literal {
             if byte_value >= 0x80 {
-            lexer_record_diagnostic(
-                state,
+                lexer_record_diagnostic(
+                    state,
                     .MalformedUtf8EscapeSequence,
-                .Error,
-                escape_start_offset,
+                    .Error,
+                    escape_start_offset,
                     state.current_byte_offset - escape_start_offset,
                     "Hexadecimal escape sequence produces malformed UTF-8 in character literal.",
-            )
+                )
 
                 return u32(byte_value), false
-        }
+            }
 
             return u32(byte_value), true
         } else {
@@ -1150,17 +1150,17 @@ lexer_scan_escape_sequence :: proc(
                 }
 
                 if target_length == 0 {
-            lexer_record_diagnostic(
-                state,
-                .MalformedUtf8EscapeSequence,
-                .Error,
-                escape_start_offset,
+                    lexer_record_diagnostic(
+                        state,
+                        .MalformedUtf8EscapeSequence,
+                        .Error,
+                        escape_start_offset,
                         state.current_byte_offset - escape_start_offset,
-                "Hexadecimal escape sequence produces malformed UTF-8.",
-            )
+                        "Hexadecimal escape sequence produces malformed UTF-8.",
+                    )
 
                     return u32(byte_value), false
-        }
+                }
 
                 sequence_bytes: [4]u8
                 sequence_bytes[0] = byte_value
@@ -1191,17 +1191,17 @@ lexer_scan_escape_sequence :: proc(
                 }
 
                 if !is_sequence_valid {
-            lexer_record_diagnostic(
-                state,
+                    lexer_record_diagnostic(
+                        state,
                         .MalformedUtf8EscapeSequence,
-                .Error,
-                escape_start_offset,
-                state.current_byte_offset - escape_start_offset,
+                        .Error,
+                        escape_start_offset,
+                        state.current_byte_offset - escape_start_offset,
                         "Hexadecimal escape sequence produces malformed UTF-8.",
-            )
+                    )
 
                     return u32(byte_value), false
-        }
+                }
 
                 state.current_byte_offset = lookahead_offset
 
@@ -1225,17 +1225,17 @@ lexer_scan_escape_sequence :: proc(
         }
 
         if digits_found < 4 {
-                lexer_record_diagnostic(
-                    state,
-                    .InvalidEscapeSequence,
-                    .Error,
-                    escape_start_offset,
+            lexer_record_diagnostic(
+                state,
+                .InvalidEscapeSequence,
+                .Error,
+                escape_start_offset,
                 state.current_byte_offset - escape_start_offset,
                 "Unicode escape sequence requires 4 hex digits.",
-                )
+            )
 
-                return 0, false
-            }
+            return 0, false
+        }
 
         // Check surrogate range
         if accumulated_value >= 0xD800 && accumulated_value <= 0xDFFF {
@@ -1641,16 +1641,16 @@ lexer_scan_raw_string :: proc(state: ^LexerState) {
                         }
 
                         if !is_whitespace_only {
-                        if !strings.has_prefix(line_slice, closing_indentation) {
-                            lexer_record_diagnostic(
-                                state,
-                                .RawStringInsufficientIndentation,
-                                .Error,
-                                start_offset + 3 + current_line_start,
-                                len(line_slice),
-                                "Raw string content line has insufficient indentation compared to closing delimiter.",
-                            )
-                            break
+                            if !strings.has_prefix(line_slice, closing_indentation) {
+                                lexer_record_diagnostic(
+                                    state,
+                                    .RawStringInsufficientIndentation,
+                                    .Error,
+                                    start_offset + 3 + current_line_start,
+                                    len(line_slice),
+                                    "Raw string content line has insufficient indentation compared to closing delimiter.",
+                                )
+                                break
                             }
                         }
                     }
@@ -1792,6 +1792,13 @@ lexer_resume_interpolated_string :: proc(state: ^LexerState) {
                 state.current_byte_offset - segment_start_offset,
                 "Interpolated string segment must not span across newlines.",
             )
+            lexer_emit_token(
+                state,
+                .InterpolatedStringEnd,
+                segment_start_offset,
+                state.current_byte_offset,
+                flags,
+            )
             pop(&state.interpolation_stack)
 
             return
@@ -1855,6 +1862,13 @@ lexer_resume_interpolated_string :: proc(state: ^LexerState) {
         segment_start_offset,
         state.current_byte_offset - segment_start_offset,
         "Unclosed interpolated string reaches end of file.",
+    )
+    lexer_emit_token(
+        state,
+        .InterpolatedStringEnd,
+        segment_start_offset,
+        state.current_byte_offset,
+        flags,
     )
     pop(&state.interpolation_stack)
 }
