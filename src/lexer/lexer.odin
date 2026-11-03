@@ -1096,8 +1096,20 @@ lexer_scan_escape_sequence :: proc(
     case '0':
         return 0x00, true
     case 'x':
-        // Exactly 2 hex digits
-        if state.current_byte_offset + 2 > len(state.source_text) {
+        accumulated_value: u32 = 0
+        digits_found: int = 0
+        for digits_found < 2 && state.current_byte_offset < len(state.source_text) {
+            current_character: u8 = state.source_text[state.current_byte_offset]
+            digit_value: int = hex_digit_to_int(current_character)
+            if digit_value < 0 {
+                break
+            }
+            accumulated_value = (accumulated_value << 4) | u32(digit_value)
+            digits_found += 1
+            state.current_byte_offset += 1
+        }
+
+        if digits_found < 2 {
             lexer_record_diagnostic(
                 state,
                 .InvalidEscapeSequence,
