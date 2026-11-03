@@ -1738,7 +1738,7 @@ lexer_tokenize_source :: proc(
     configuration: LexerConfiguration = {},
 ) -> LexedSourceFile {
     allocator: runtime.Allocator = configuration.allocator
-    if allocator.data == nil {
+    if allocator.procedure == nil {
         allocator = context.allocator
     }
 
@@ -1750,12 +1750,14 @@ lexer_tokenize_source :: proc(
         top_level_spans         = make([dynamic]TopLevelTokenSpan, allocator),
         line_start_offsets      = make([dynamic]u32, allocator),
         diagnostics             = make([dynamic]LexerDiagnostic, allocator),
-        delimiter_stack         = make([dynamic]DelimiterStackEntry, context.temp_allocator),
-        interpolation_stack     = make([dynamic]InterpolationFrame, context.temp_allocator),
+        delimiter_stack         = make([dynamic]DelimiterStackEntry, allocator),
+        interpolation_stack     = make([dynamic]InterpolationFrame, allocator),
         current_top_level_start = 0,
         preceded_by_whitespace  = false,
         preceded_by_newline     = false,
     }
+    defer delete(state.delimiter_stack)
+    defer delete(state.interpolation_stack)
 
     // Line 1 starts at byte offset 0
     append(&state.line_start_offsets, 0)
