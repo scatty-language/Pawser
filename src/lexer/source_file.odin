@@ -20,6 +20,69 @@ source_file_metadata_destroy :: proc(metadata: ^SourceFileMetadata) {
     delete(metadata.diagnostics)
 }
 
+// Determines whether an identifier string conforms to public, internal, private, or local identifier format rules.
+source_file_is_valid_identifier_name :: proc(identifier_name: string) -> bool {
+    identifier_length: int = len(identifier_name)
+    if identifier_length == 0 {
+        return false
+    }
+
+    // Verify all characters are ASCII alphanumeric or underscore
+    underscore_count: int = 0
+    for character_index in 0 ..< identifier_length {
+        current_character: u8 = identifier_name[character_index]
+        is_alphanumeric_or_underscore: bool = (current_character >= 'A' && current_character <= 'Z') ||
+                                              (current_character >= 'a' && current_character <= 'z') ||
+                                              (current_character >= '0' && current_character <= '9') ||
+                                              (current_character == '_')
+        if !is_alphanumeric_or_underscore {
+            return false
+        }
+        if current_character == '_' {
+            underscore_count += 1
+        }
+    }
+
+    first_character: u8 = identifier_name[0]
+
+    // PublicIdentifier: starts with uppercase letter and contains no underscores
+    if first_character >= 'A' && first_character <= 'Z' {
+        if underscore_count == 0 {
+            return true
+        }
+
+        // InternalIdentifier: starts with uppercase letter and ends with a single underscore
+        if underscore_count == 1 && identifier_name[identifier_length - 1] == '_' {
+            return true
+        }
+
+        return false
+    }
+
+    // PrivateIdentifier: starts with underscore followed by a lowercase letter and contains no other underscores
+    if first_character == '_' {
+        if identifier_length >= 2 &&
+           identifier_name[1] >= 'a' &&
+           identifier_name[1] <= 'z' &&
+           underscore_count == 1 {
+            return true
+        }
+
+        return false
+    }
+
+    // LocalIdentifier: starts with lowercase letter and contains no underscores
+    if first_character >= 'a' && first_character <= 'z' {
+        if underscore_count == 0 {
+            return true
+        }
+
+        return false
+    }
+
+    return false
+}
+
 // Validates a file path against language extension and canonical conditional suffix ordering rules.
 source_file_validate_path :: proc(
     file_path: string,
@@ -70,7 +133,9 @@ source_file_validate_path :: proc(
         }
     }
 
-    segments := make([dynamic]string, context.temp_allocator)
+    segments := make([dynamic]string, allocator)
+    defer delete(segments)
+
     current_segment_start: int = 0
     for character_index in 0 ..< len(without_extension) {
         if without_extension[character_index] == '.' {
@@ -94,42 +159,17 @@ source_file_validate_path :: proc(
 
     metadata.base_name = segments[0]
 
-    // Validate base name format (must be non-empty valid identifier)
-    base_name: string = metadata.base_name
-    first_character: u8 = base_name[0]
-    is_valid_first_character: bool = (first_character >= 'A' && first_character <= 'Z') ||
-                                     (first_character >= 'a' && first_character <= 'z') ||
-                                     (first_character == '_')
-
-    if !is_valid_first_character {
+    // Validate base name format against Scatty identifier rules
+    if !source_file_is_valid_identifier_name(metadata.base_name) {
         metadata.is_valid = false
         append(&metadata.diagnostics, LexerDiagnostic{
-            code     = .EmptyFileBaseName,
+            code     = .InvalidIdentifierFormat,
             severity = .Error,
             span     = TextSpan{byte_offset = 0, byte_length = u32(len(file_path))},
-            message  = "Source file base name must be a valid identifier.",
+            message  = "Source file base name must follow valid identifier format rules.",
         })
 
         return metadata
-    }
-
-    for character_index in 1 ..< len(base_name) {
-        current_character: u8 = base_name[character_index]
-        is_valid_character: bool = (current_character >= 'A' && current_character <= 'Z') ||
-                                   (current_character >= 'a' && current_character <= 'z') ||
-                                   (current_character >= '0' && current_character <= '9') ||
-                                   (current_character == '_')
-        if !is_valid_character {
-            metadata.is_valid = false
-            append(&metadata.diagnostics, LexerDiagnostic{
-                code     = .EmptyFileBaseName,
-                severity = .Error,
-                span     = TextSpan{byte_offset = 0, byte_length = u32(len(file_path))},
-                message  = "Source file base name must contain only alphanumeric characters or underscores.",
-            })
-
-            return metadata
-        }
     }
 
     CATEGORY_CUSTOM           :: 0
