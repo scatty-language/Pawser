@@ -1,6 +1,7 @@
 package tests
 
 import "core:testing"
+import "base:runtime"
 import pawser "../../src"
 
 // Verifies that canonical file paths with valid suffixes are recognized successfully.
@@ -104,4 +105,60 @@ source_file_test_line_column_calculation :: proc(test_context: ^testing.T) {
     position_third: pawser.LineColumn = pawser.lexed_source_file_compute_line_column(&lexed_file, 17)
     testing.expect_value(test_context, position_third.line, 3)
     testing.expect_value(test_context, position_third.column, 1)
+}
+
+// Rejects any allocation attempts on the temporary allocator to verify allocator isolation.
+@(private = "file")
+forbid_temp_allocator_proc :: proc(
+    allocator_data: rawptr,
+    mode: runtime.Allocator_Mode,
+    size: int,
+    alignment: int,
+    old_memory: rawptr,
+    old_size: int,
+    location := #caller_location,
+) -> ([]byte, runtime.Allocator_Error) {
+    return nil, .Out_Of_Memory
+}
+
+// Verifies that source_file_validate_path allocates exclusively through the provided allocator without touching context.temp_allocator.
+@(test)
+source_file_test_validate_path_allocator_isolation :: proc(test_context: ^testing.T) {
+    previous_temp_allocator: runtime.Allocator = context.temp_allocator
+    context.temp_allocator = runtime.Allocator{
+        procedure = forbid_temp_allocator_proc,
+        data      = nil,
+    }
+    defer context.temp_allocator = previous_temp_allocator
+
+    allowed_flags := []string{"vulkan"}
+    metadata: pawser.SourceFileMetadata = pawser.source_file_validate_path(
+        "Renderer.vulkan.release.windows.amd64.cat",
+        allowed_flags,
+        context.allocator,
+    )
+    defer pawser.source_file_metadata_destroy(&metadata)
+
+    testing.expect(test_context, metadata.is_valid, "Expected path validation to succeed without using context.temp_allocator")
+    testing.expect_value(test_context, metadata.base_name, "Renderer")
+}
+
+// Verifies that file base names violating identifier formatting rules are rejected.
+@(test)
+source_file_test_malformed_identifier_base_names :: proc(test_context: ^testing.T) {
+    invalid_base_names := []string{
+        "_Data.cat",
+        "Data__.cat",
+        "user_age.cat",
+        "_.cat",
+        "_123.cat",
+    }
+
+    for invalid_path in invalid_base_names {
+        metadata: pawser.SourceFileMetadata = pawser.source_file_validate_path(invalid_path)
+        defer pawser.source_file_metadata_destroy(&metadata)
+
+        testing.expect(test_context, !metadata.is_valid, "Expected file path with malformed identifier base name to be invalid")
+        testing.expect(test_context, len(metadata.diagnostics) >= 1, "Expected diagnostic for malformed file base name")
+    }
 }
