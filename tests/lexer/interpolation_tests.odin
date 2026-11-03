@@ -165,3 +165,87 @@ interpolation_test_malformed_escapes_in_segments :: proc(test_context: ^testing.
     testing.expect_value(test_context, lexed_file.tokens[4].kind, pawser.TokenKind.InterpolatedStringEnd)
     testing.expect_value(test_context, lexed_file.tokens[5].kind, pawser.TokenKind.Semicolon)
 }
+
+// Verifies that an unclosed string interpolation at a line break recovers without corrupting subsequent parentheses or top-level spans.
+@(test)
+interpolation_test_unterminated_expression_newline_recovery :: proc(test_context: ^testing.T) {
+    source_code: string = "broken := \"Hello \\(userName\nNormalCall();\nTopLevelConst :: 100;\n"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect(test_context, len(lexed_file.diagnostics) >= 1, "Expected diagnostic for unclosed interpolation")
+
+    // Verify that 'NormalCall();' on line 2 has a normal RightParenthesis and is NOT treated as InterpolationEnd
+    found_normal_call: bool = false
+    found_top_level_const: bool = false
+
+    for token_index in 0 ..< len(lexed_file.tokens) {
+        token: pawser.Token = lexed_file.tokens[token_index]
+        lexeme: string = pawser.token_extract_lexeme(token, source_code)
+
+        if token.kind == .PublicIdentifier && lexeme == "NormalCall" {
+            found_normal_call = true
+            if token_index + 2 < len(lexed_file.tokens) {
+                testing.expect_value(test_context, lexed_file.tokens[token_index + 1].kind, pawser.TokenKind.LeftParenthesis)
+                testing.expect_value(test_context, lexed_file.tokens[token_index + 2].kind, pawser.TokenKind.RightParenthesis)
+            }
+        }
+
+        if token.kind == .PublicIdentifier && lexeme == "TopLevelConst" {
+            found_top_level_const = true
+        }
+    }
+
+    testing.expect(test_context, found_normal_call, "Expected NormalCall to be tokenized as normal code")
+    testing.expect(test_context, found_top_level_const, "Expected TopLevelConst to be tokenized as normal code instead of string content")
+    testing.expect(test_context, len(lexed_file.top_level_spans) >= 1, "Expected subsequent top-level declarations to be recorded in top_level_spans")
+}
+
+// Verifies that a missing closing parenthesis inside an interpolation before the closing quote does not swallow the semicolon or corrupt top-level spans.
+@(test)
+interpolation_test_unclosed_inner_parenthesis_recovery :: proc(test_context: ^testing.T) {
+    source_code: string = "msg := \"Result: \\(compute(1, 2)\";\nNextConst :: (10 + 20);\n"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect(test_context, len(lexed_file.diagnostics) >= 1, "Expected diagnostic for unclosed parenthesis in interpolation")
+
+    // The closing quote on line 1 must NOT start a new StringLiteral that swallows the trailing semicolon '";'
+    for token in lexed_file.tokens {
+        if token.kind == .StringLiteral {
+            testing.expect(
+                test_context,
+                pawser.token_extract_lexeme(token, source_code) != "\";",
+                "Closing quote of broken interpolation must not start a new StringLiteral swallowing ';'",
+            )
+        }
+    }
+
+    // Subsequent top-level declaration 'NextConst :: (10 + 20);' must still be recorded in top_level_spans
+    testing.expect(test_context, len(lexed_file.top_level_spans) >= 1, "Expected top_level_spans to record subsequent top-level declarations")
+}
+
+// Verifies that a mismatched closing brace inside an interpolation keeps parenthesis depth synchronized with the delimiter stack.
+@(test)
+interpolation_test_mismatched_delimiter_depth_sync :: proc(test_context: ^testing.T) {
+    source_code: string = "\"\\({ ( } )\" ;"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    // The unclosed '(' inside '{ ( }' is unwound by '}', so the outer ')' must still close the interpolation
+    found_interpolation_end: bool = false
+    found_string_end: bool = false
+
+    for token in lexed_file.tokens {
+        if token.kind == .InterpolationEnd {
+            found_interpolation_end = true
+        }
+        if token.kind == .InterpolatedStringEnd {
+            found_string_end = true
+        }
+    }
+
+    testing.expect(test_context, found_interpolation_end, "Expected outer ')' to be recognized as InterpolationEnd after stack unwinding")
+    testing.expect(test_context, found_string_end, "Expected closing quote to be recognized as InterpolatedStringEnd")
+    testing.expect_value(test_context, lexed_file.tokens[len(lexed_file.tokens) - 2].kind, pawser.TokenKind.Semicolon)
+}
