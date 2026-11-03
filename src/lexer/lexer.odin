@@ -1486,8 +1486,37 @@ lexer_scan_raw_string :: proc(state: ^LexerState) {
     }
 
     if !found_closing_quotes {
-        // Advance to end of text
-        state.current_byte_offset = len(state.source_text)
+        for state.current_byte_offset < len(state.source_text) {
+            current_character: u8 = state.source_text[state.current_byte_offset]
+            if current_character == '\r' {
+                state.current_byte_offset += 1
+                if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\n' {
+                    state.current_byte_offset += 1
+                }
+                append(&state.line_start_offsets, u32(state.current_byte_offset))
+                continue
+            }
+            if current_character == '\n' {
+                state.current_byte_offset += 1
+                append(&state.line_start_offsets, u32(state.current_byte_offset))
+                continue
+            }
+            sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
+            if !is_valid_utf8 {
+                lexer_record_diagnostic(
+                    state,
+                    .MalformedUtf8Sequence,
+                    .Error,
+                    state.current_byte_offset,
+                    1,
+                    "Malformed UTF-8 sequence in raw string.",
+                )
+                state.current_byte_offset += 1
+            } else {
+                state.current_byte_offset += sequence_length
+            }
+        }
+
         lexer_record_diagnostic(
             state,
             .UnterminatedRawStringLiteral,
@@ -1546,10 +1575,24 @@ lexer_scan_raw_string :: proc(state: ^LexerState) {
 
             for index in 0 ..< len(content_inside) {
                 character: u8 = content_inside[index]
+                if character == '\n' && index > 0 && content_inside[index - 1] == '\r' {
+                    continue
+                }
+
                 if character == '\n' || character == '\r' {
                     line_slice: string = content_inside[current_line_start:index]
                     // Skip checking the opening line
                     if current_line_start > 0 && len(line_slice) > 0 {
+                        is_whitespace_only: bool = true
+                        for byte_index in 0 ..< len(line_slice) {
+                            line_character: u8 = line_slice[byte_index]
+                            if line_character != ' ' && line_character != '\t' {
+                                is_whitespace_only = false
+                                break
+                            }
+                        }
+
+                        if !is_whitespace_only {
                         if !strings.has_prefix(line_slice, closing_indentation) {
                             lexer_record_diagnostic(
                                 state,
@@ -1560,6 +1603,7 @@ lexer_scan_raw_string :: proc(state: ^LexerState) {
                                 "Raw string content line has insufficient indentation compared to closing delimiter.",
                             )
                             break
+                            }
                         }
                     }
 
