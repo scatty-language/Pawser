@@ -172,6 +172,128 @@ lexer_record_diagnostic :: proc(
     })
 }
 
+// Determines whether a byte character represents an ASCII uppercase letter.
+character_is_ascii_upper :: proc(character: u8) -> bool {
+    return character >= 'A' && character <= 'Z'
+}
+
+// Determines whether a byte character represents an ASCII lowercase letter.
+character_is_ascii_lower :: proc(character: u8) -> bool {
+    return character >= 'a' && character <= 'z'
+}
+
+// Determines whether a byte character represents an ASCII decimal digit.
+character_is_ascii_digit :: proc(character: u8) -> bool {
+    return character >= '0' && character <= '9'
+}
+
+// Determines whether a byte character represents an ASCII hexadecimal digit.
+character_is_ascii_hex_digit :: proc(character: u8) -> bool {
+    return character_is_ascii_digit(character) ||
+           (character >= 'a' && character <= 'f') ||
+           (character >= 'A' && character <= 'F')
+}
+
+// Determines whether a byte character represents a valid initial character of an identifier.
+character_is_identifier_start :: proc(character: u8) -> bool {
+    return character_is_ascii_upper(character) ||
+           character_is_ascii_lower(character) ||
+           character == '_'
+}
+
+// Determines whether a byte character represents a valid trailing character of an identifier.
+character_is_identifier_part :: proc(character: u8) -> bool {
+    return character_is_ascii_upper(character) ||
+           character_is_ascii_lower(character) ||
+           character_is_ascii_digit(character) ||
+           character == '_'
+}
+
+// Classifies a candidate identifier string into a specific `TokenKind` or reports it as malformed.
+identifier_classify_format :: proc(lexeme: string) -> TokenKind {
+    lexeme_length: int = len(lexeme)
+    if lexeme_length == 0 {
+        return .MalformedIdentifier
+    }
+
+    underscore_count: int = 0
+    for character_index in 0 ..< lexeme_length {
+        if lexeme[character_index] == '_' {
+            underscore_count += 1
+        }
+    }
+
+    first_character: u8 = lexeme[0]
+
+    if character_is_ascii_upper(first_character) {
+        if underscore_count == 0 {
+            return .PublicIdentifier
+        }
+        if underscore_count == 1 && lexeme[lexeme_length - 1] == '_' {
+            return .InternalIdentifier
+        }
+    } else if first_character == '_' {
+        if lexeme_length >= 2 && character_is_ascii_lower(lexeme[1]) && underscore_count == 1 {
+            return .PrivateIdentifier
+        }
+    } else if character_is_ascii_lower(first_character) {
+        if underscore_count == 0 {
+            return .LocalIdentifier
+        }
+    }
+
+    return .MalformedIdentifier
+}
+
+// Unpacks a 1-, 2-, 3-, or 4-byte UTF-8 sequence into a Unicode scalar code point value.
+utf8_decode_code_point :: proc(bytes: string, sequence_length: int) -> u32 {
+    switch sequence_length {
+    case 1:
+        return u32(bytes[0])
+    case 2:
+        byte_0: u32 = u32(bytes[0] & 0x1F)
+        byte_1: u32 = u32(bytes[1] & 0x3F)
+
+        return (byte_0 << 6) | byte_1
+    case 3:
+        byte_0: u32 = u32(bytes[0] & 0x0F)
+        byte_1: u32 = u32(bytes[1] & 0x3F)
+        byte_2: u32 = u32(bytes[2] & 0x3F)
+
+        return (byte_0 << 12) | (byte_1 << 6) | byte_2
+    case 4:
+        byte_0: u32 = u32(bytes[0] & 0x07)
+        byte_1: u32 = u32(bytes[1] & 0x3F)
+        byte_2: u32 = u32(bytes[2] & 0x3F)
+        byte_3: u32 = u32(bytes[3] & 0x3F)
+
+        return (byte_0 << 18) | (byte_1 << 12) | (byte_2 << 6) | byte_3
+    case:
+        return 0
+    }
+}
+
+// Determines whether a Unicode code point falls within the UTF-16 surrogate range.
+unicode_code_point_is_surrogate :: proc(code_point: u32) -> bool {
+    return code_point >= 0xD800 && code_point <= 0xDFFF
+}
+
+// Determines whether an opening `TokenKind` and a closing `TokenKind` form a matched delimiter pair.
+delimiter_is_matching_pair :: proc(opening: TokenKind, closing: TokenKind) -> bool {
+    #partial switch closing {
+    case .RightBrace:
+        return opening == .LeftBrace
+    case .RightBracket:
+        return opening == .LeftBracket
+    case .RightParenthesis:
+        return opening == .LeftParenthesis
+    case .InterpolationEnd:
+        return opening == .InterpolationStart
+    case:
+        return false
+    }
+}
+
 // Appends a new `Token` to the token stream and executes delimiter pairing and top-level span checks.
 lexer_emit_token :: proc(
     state: ^LexerState,
@@ -215,17 +337,7 @@ lexer_emit_token :: proc(
         if len(state.delimiter_stack) > 0 {
             top_index: int = len(state.delimiter_stack) - 1
             top_entry: DelimiterStackEntry = state.delimiter_stack[top_index]
-            is_matching: bool = false
-
-            if kind == .RightBrace && top_entry.kind == .LeftBrace {
-                is_matching = true
-            } else if kind == .RightBracket && top_entry.kind == .LeftBracket {
-                is_matching = true
-            } else if kind == .RightParenthesis && top_entry.kind == .LeftParenthesis {
-                is_matching = true
-            } else if kind == .InterpolationEnd && top_entry.kind == .InterpolationStart {
-                is_matching = true
-            }
+            is_matching: bool = delimiter_is_matching_pair(top_entry.kind, kind)
 
             if is_matching {
                 pop(&state.delimiter_stack)
@@ -236,18 +348,7 @@ lexer_emit_token :: proc(
                 found_match_index: int = -1
                 for search_index := top_index; search_index >= 0; search_index -= 1 {
                     candidate: DelimiterStackEntry = state.delimiter_stack[search_index]
-                    matches_candidate: bool = false
-                    if kind == .RightBrace && candidate.kind == .LeftBrace {
-                        matches_candidate = true
-                    } else if kind == .RightBracket && candidate.kind == .LeftBracket {
-                        matches_candidate = true
-                    } else if kind == .RightParenthesis && candidate.kind == .LeftParenthesis {
-                        matches_candidate = true
-                    } else if kind == .InterpolationEnd && candidate.kind == .InterpolationStart {
-                        matches_candidate = true
-                    }
-
-                    if matches_candidate {
+                    if delimiter_is_matching_pair(candidate.kind, kind) {
                         found_match_index = search_index
                         break
                     }
@@ -345,6 +446,60 @@ lexer_unwind_active_interpolation :: proc(state: ^LexerState) {
     pop(&state.interpolation_stack)
 }
 
+// Validates and advances across a single UTF-8 sequence in `LexerState`, recording diagnostics on failure.
+lexer_advance_utf8_character :: proc(
+    state: ^LexerState,
+    error_message: string,
+) -> (code_point: u32, is_valid: bool) {
+    sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
+    if !is_valid_utf8 {
+        lexer_record_diagnostic(
+            state,
+            .MalformedUtf8Sequence,
+            .Error,
+            state.current_byte_offset,
+            1,
+            error_message,
+        )
+        state.current_byte_offset += 1
+
+        return 0, false
+    }
+
+    remaining_bytes: string = state.source_text[state.current_byte_offset:]
+    code_point = utf8_decode_code_point(remaining_bytes, sequence_length)
+    state.current_byte_offset += sequence_length
+
+    return code_point, true
+}
+
+// Consumes a carriage return, line feed, or CRLF sequence in `LexerState` and records the new line offset.
+lexer_consume_newline :: proc(state: ^LexerState) -> bool {
+    if state.current_byte_offset >= len(state.source_text) {
+        return false
+    }
+
+    character: u8 = state.source_text[state.current_byte_offset]
+    if character == '\r' {
+        state.current_byte_offset += 1
+        if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\n' {
+            state.current_byte_offset += 1
+        }
+        append(&state.line_start_offsets, u32(state.current_byte_offset))
+
+        return true
+    }
+
+    if character == '\n' {
+        state.current_byte_offset += 1
+        append(&state.line_start_offsets, u32(state.current_byte_offset))
+
+        return true
+    }
+
+    return false
+}
+
 // Skips whitespace characters and single/multi-line comments while recording line starting offsets.
 lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
     for state.current_byte_offset < len(state.source_text) {
@@ -358,28 +513,13 @@ lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
         }
 
         // Carriage Return and Line Feed
-        if current_character == '\r' {
+        if current_character == '\r' || current_character == '\n' {
             for len(state.interpolation_stack) > 0 {
                 lexer_unwind_active_interpolation(state)
             }
             state.preceded_by_whitespace = true
             state.preceded_by_newline    = true
-            state.current_byte_offset += 1
-            if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\n' {
-                state.current_byte_offset += 1
-            }
-            append(&state.line_start_offsets, u32(state.current_byte_offset))
-            continue
-        }
-
-        if current_character == '\n' {
-            for len(state.interpolation_stack) > 0 {
-                lexer_unwind_active_interpolation(state)
-            }
-            state.preceded_by_whitespace = true
-            state.preceded_by_newline    = true
-            state.current_byte_offset += 1
-            append(&state.line_start_offsets, u32(state.current_byte_offset))
+            lexer_consume_newline(state)
             continue
         }
 
@@ -397,20 +537,7 @@ lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
                         // Do NOT consume newline so newline handling triggers next
                         break
                     }
-                    sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-                    if !is_valid_utf8 {
-                        lexer_record_diagnostic(
-                            state,
-                            .MalformedUtf8Sequence,
-                            .Error,
-                            state.current_byte_offset,
-                            1,
-                            "Malformed UTF-8 sequence in comment.",
-                        )
-                        state.current_byte_offset += 1
-                    } else {
-                        state.current_byte_offset += sequence_length
-                    }
+                    lexer_advance_utf8_character(state, "Malformed UTF-8 sequence in comment.")
                 }
                 continue
             }
@@ -425,20 +552,9 @@ lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
                 for state.current_byte_offset < len(state.source_text) && nesting_depth > 0 {
                     block_character: u8 = state.source_text[state.current_byte_offset]
 
-                    if block_character == '\r' {
+                    if block_character == '\r' || block_character == '\n' {
                         state.preceded_by_newline = true
-                        state.current_byte_offset += 1
-                        if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\n' {
-                            state.current_byte_offset += 1
-                        }
-                        append(&state.line_start_offsets, u32(state.current_byte_offset))
-                        continue
-                    }
-
-                    if block_character == '\n' {
-                        state.preceded_by_newline = true
-                        state.current_byte_offset += 1
-                        append(&state.line_start_offsets, u32(state.current_byte_offset))
+                        lexer_consume_newline(state)
                         continue
                     }
 
@@ -456,20 +572,7 @@ lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
                         continue
                     }
 
-                    sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-                    if !is_valid_utf8 {
-                        lexer_record_diagnostic(
-                            state,
-                            .MalformedUtf8Sequence,
-                            .Error,
-                            state.current_byte_offset,
-                            1,
-                            "Malformed UTF-8 sequence in block comment.",
-                        )
-                        state.current_byte_offset += 1
-                    } else {
-                        state.current_byte_offset += sequence_length
-                    }
+                    lexer_advance_utf8_character(state, "Malformed UTF-8 sequence in block comment.")
                 }
 
                 if nesting_depth > 0 {
@@ -496,11 +599,7 @@ lexer_scan_identifier :: proc(state: ^LexerState) {
 
     for state.current_byte_offset < len(state.source_text) {
         current_character: u8 = state.source_text[state.current_byte_offset]
-        is_identifier_part: bool = (current_character >= 'A' && current_character <= 'Z') ||
-                                   (current_character >= 'a' && current_character <= 'z') ||
-                                   (current_character >= '0' && current_character <= '9') ||
-                                   (current_character == '_')
-        if !is_identifier_part {
+        if !character_is_identifier_part(current_character) {
             break
         }
         state.current_byte_offset += 1
@@ -566,34 +665,7 @@ lexer_scan_identifier :: proc(state: ^LexerState) {
         return
     }
 
-    // Not a keyword: validate identifier category format
-    // Count underscores
-    underscore_count: int = 0
-    for character_index in 0 ..< lexeme_length {
-        if lexeme[character_index] == '_' {
-            underscore_count += 1
-        }
-    }
-
-    first_character: u8 = lexeme[0]
-    token_kind: TokenKind = .MalformedIdentifier
-
-    if first_character >= 'A' && first_character <= 'Z' {
-        if underscore_count == 0 {
-            token_kind = .PublicIdentifier
-        } else if underscore_count == 1 && lexeme[lexeme_length - 1] == '_' {
-            token_kind = .InternalIdentifier
-        }
-    } else if first_character == '_' {
-        if lexeme_length >= 2 && lexeme[1] >= 'a' && lexeme[1] <= 'z' && underscore_count == 1 {
-            token_kind = .PrivateIdentifier
-        }
-    } else if first_character >= 'a' && first_character <= 'z' {
-        if underscore_count == 0 {
-            token_kind = .LocalIdentifier
-        }
-    }
-
+    token_kind: TokenKind = identifier_classify_format(lexeme)
     identifier_hash: u64 = hash_compute_fnv1a64(lexeme)
 
     if token_kind == .MalformedIdentifier {
@@ -628,20 +700,7 @@ lexer_scan_escaped_keyword :: proc(state: ^LexerState) {
             break
         }
 
-        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-        if !is_valid_utf8 {
-            lexer_record_diagnostic(
-                state,
-                .MalformedUtf8Sequence,
-                .Error,
-                state.current_byte_offset,
-                1,
-                "Malformed UTF-8 sequence inside escaped identifier.",
-            )
-            state.current_byte_offset += 1
-        } else {
-            state.current_byte_offset += sequence_length
-        }
+        lexer_advance_utf8_character(state, "Malformed UTF-8 sequence inside escaped identifier.")
     }
 
     if !found_closing_backtick {
@@ -697,7 +756,7 @@ lexer_scan_decimal_digits :: proc(
 
     for state.current_byte_offset < len(state.source_text) {
         current_character: u8 = state.source_text[state.current_byte_offset]
-        if current_character >= '0' && current_character <= '9' {
+        if character_is_ascii_digit(current_character) {
             digit_count += 1
             previous_was_underscore = false
             state.current_byte_offset += 1
@@ -717,6 +776,48 @@ lexer_scan_decimal_digits :: proc(
     }
 
     return digit_count, has_malformed_underscore
+}
+
+// Scans an integer literal suffix (`uL`, `u`, or `L`) in `LexerState` and returns the resulting `TokenFlags`.
+lexer_scan_integer_suffix :: proc(state: ^LexerState) -> TokenFlags {
+    flags: TokenFlags = {}
+
+    if state.current_byte_offset + 1 < len(state.source_text) &&
+       state.source_text[state.current_byte_offset] == 'u' &&
+       state.source_text[state.current_byte_offset + 1] == 'L' {
+        flags += {.IntegerSuffixUnsignedLong}
+        state.current_byte_offset += 2
+    } else if state.current_byte_offset < len(state.source_text) &&
+              state.source_text[state.current_byte_offset] == 'u' {
+        flags += {.IntegerSuffixUnsigned}
+        state.current_byte_offset += 1
+    } else if state.current_byte_offset < len(state.source_text) &&
+              state.source_text[state.current_byte_offset] == 'L' {
+        flags += {.IntegerSuffixLong}
+        state.current_byte_offset += 1
+    }
+
+    return flags
+}
+
+// Consumes and reports any illegal trailing identifier characters following a number literal in `LexerState`.
+lexer_validate_number_trailing_characters :: proc(state: ^LexerState) {
+    if state.current_byte_offset < len(state.source_text) &&
+       character_is_identifier_part(state.source_text[state.current_byte_offset]) {
+        invalid_suffix_start: int = state.current_byte_offset
+        for state.current_byte_offset < len(state.source_text) &&
+            character_is_identifier_part(state.source_text[state.current_byte_offset]) {
+            state.current_byte_offset += 1
+        }
+        lexer_record_diagnostic(
+            state,
+            .InvalidNumberSuffix,
+            .Error,
+            invalid_suffix_start,
+            state.current_byte_offset - invalid_suffix_start,
+            "Invalid number literal suffix.",
+        )
+    }
 }
 
 // Scans numeric literals including integers, hexadecimals, binaries, and floating-point numbers.
@@ -753,9 +854,7 @@ lexer_scan_number :: proc(state: ^LexerState) {
 
             for state.current_byte_offset < len(state.source_text) {
                 hex_character: u8 = state.source_text[state.current_byte_offset]
-                is_hex_digit: bool = (hex_character >= '0' && hex_character <= '9') ||
-                                     (hex_character >= 'a' && hex_character <= 'f') ||
-                                     (hex_character >= 'A' && hex_character <= 'F')
+                is_hex_digit: bool = character_is_ascii_hex_digit(hex_character)
                 if is_hex_digit {
                     digit_count += 1
                     previous_was_underscore = false
@@ -786,52 +885,8 @@ lexer_scan_number :: proc(state: ^LexerState) {
                 )
             }
 
-            // Suffix check
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset] == 'u' &&
-               state.source_text[state.current_byte_offset + 1] == 'L' {
-                flags += {.IntegerSuffixUnsignedLong}
-                state.current_byte_offset += 2
-            } else if state.current_byte_offset < len(state.source_text) &&
-                      state.source_text[state.current_byte_offset] == 'u' {
-                flags += {.IntegerSuffixUnsigned}
-                state.current_byte_offset += 1
-            } else if state.current_byte_offset < len(state.source_text) &&
-                      state.source_text[state.current_byte_offset] == 'L' {
-                flags += {.IntegerSuffixLong}
-                state.current_byte_offset += 1
-            }
-
-            // Trailing invalid characters check
-            if state.current_byte_offset < len(state.source_text) {
-                trailing_character: u8 = state.source_text[state.current_byte_offset]
-                if (trailing_character >= 'a' && trailing_character <= 'z') ||
-                   (trailing_character >= 'A' && trailing_character <= 'Z') ||
-                   (trailing_character >= '0' && trailing_character <= '9') ||
-                   (trailing_character == '_') {
-                    invalid_suffix_start: int = state.current_byte_offset
-                    for state.current_byte_offset < len(state.source_text) {
-                        character_to_check: u8 = state.source_text[state.current_byte_offset]
-                        if (character_to_check >= 'a' && character_to_check <= 'z') ||
-                           (character_to_check >= 'A' && character_to_check <= 'Z') ||
-                           (character_to_check >= '0' && character_to_check <= '9') ||
-                           (character_to_check == '_') {
-                            state.current_byte_offset += 1
-                        } else {
-                            break
-                        }
-                    }
-                    lexer_record_diagnostic(
-                        state,
-                        .InvalidNumberSuffix,
-                        .Error,
-                        invalid_suffix_start,
-                        state.current_byte_offset - invalid_suffix_start,
-                        "Invalid number literal suffix.",
-                    )
-                }
-            }
-
+            flags += lexer_scan_integer_suffix(state)
+            lexer_validate_number_trailing_characters(state)
             lexer_emit_token(state, .IntegerLiteral, start_offset, state.current_byte_offset, flags)
 
             return
@@ -913,52 +968,8 @@ lexer_scan_number :: proc(state: ^LexerState) {
                 )
             }
 
-            // Suffix check
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset] == 'u' &&
-               state.source_text[state.current_byte_offset + 1] == 'L' {
-                flags += {.IntegerSuffixUnsignedLong}
-                state.current_byte_offset += 2
-            } else if state.current_byte_offset < len(state.source_text) &&
-                      state.source_text[state.current_byte_offset] == 'u' {
-                flags += {.IntegerSuffixUnsigned}
-                state.current_byte_offset += 1
-            } else if state.current_byte_offset < len(state.source_text) &&
-                      state.source_text[state.current_byte_offset] == 'L' {
-                flags += {.IntegerSuffixLong}
-                state.current_byte_offset += 1
-            }
-
-            // Trailing invalid characters check
-            if state.current_byte_offset < len(state.source_text) {
-                trailing_character: u8 = state.source_text[state.current_byte_offset]
-                if (trailing_character >= 'a' && trailing_character <= 'z') ||
-                   (trailing_character >= 'A' && trailing_character <= 'Z') ||
-                   (trailing_character >= '0' && trailing_character <= '9') ||
-                   (trailing_character == '_') {
-                    invalid_suffix_start: int = state.current_byte_offset
-                    for state.current_byte_offset < len(state.source_text) {
-                        character_to_check: u8 = state.source_text[state.current_byte_offset]
-                        if (character_to_check >= 'a' && character_to_check <= 'z') ||
-                           (character_to_check >= 'A' && character_to_check <= 'Z') ||
-                           (character_to_check >= '0' && character_to_check <= '9') ||
-                           (character_to_check == '_') {
-                            state.current_byte_offset += 1
-                        } else {
-                            break
-                        }
-                    }
-                    lexer_record_diagnostic(
-                        state,
-                        .InvalidNumberSuffix,
-                        .Error,
-                        invalid_suffix_start,
-                        state.current_byte_offset - invalid_suffix_start,
-                        "Invalid number literal suffix.",
-                    )
-                }
-            }
-
+            flags += lexer_scan_integer_suffix(state)
+            lexer_validate_number_trailing_characters(state)
             lexer_emit_token(state, .IntegerLiteral, start_offset, state.current_byte_offset, flags)
 
             return
@@ -975,7 +986,7 @@ lexer_scan_number :: proc(state: ^LexerState) {
         // Crucial lookahead: only consume '.' if followed by an ASCII digit
         if state.current_byte_offset + 1 < len(state.source_text) {
             next_after_dot: u8 = state.source_text[state.current_byte_offset + 1]
-            if next_after_dot >= '0' && next_after_dot <= '9' {
+            if character_is_ascii_digit(next_after_dot) {
                 is_float = true
                 state.current_byte_offset += 1 // Consume '.'
                 fraction_digit_count, has_malformed_fraction_underscore := lexer_scan_decimal_digits(state)
@@ -1053,55 +1064,50 @@ lexer_scan_number :: proc(state: ^LexerState) {
             }
         }
     } else {
-        // Integer suffixes: uL, u, L
-        if state.current_byte_offset + 1 < len(state.source_text) &&
-           state.source_text[state.current_byte_offset] == 'u' &&
-           state.source_text[state.current_byte_offset + 1] == 'L' {
-            flags += {.IntegerSuffixUnsignedLong}
-            state.current_byte_offset += 2
-        } else if state.current_byte_offset < len(state.source_text) &&
-                  state.source_text[state.current_byte_offset] == 'u' {
-            flags += {.IntegerSuffixUnsigned}
-            state.current_byte_offset += 1
-        } else if state.current_byte_offset < len(state.source_text) &&
-                  state.source_text[state.current_byte_offset] == 'L' {
-            flags += {.IntegerSuffixLong}
-            state.current_byte_offset += 1
-        }
+        flags += lexer_scan_integer_suffix(state)
     }
 
-    // Trailing invalid characters check
-    if state.current_byte_offset < len(state.source_text) {
-        trailing_character: u8 = state.source_text[state.current_byte_offset]
-        if (trailing_character >= 'a' && trailing_character <= 'z') ||
-           (trailing_character >= 'A' && trailing_character <= 'Z') ||
-           (trailing_character >= '0' && trailing_character <= '9') ||
-           (trailing_character == '_') {
-            invalid_suffix_start: int = state.current_byte_offset
-            for state.current_byte_offset < len(state.source_text) {
-                character_to_check: u8 = state.source_text[state.current_byte_offset]
-                if (character_to_check >= 'a' && character_to_check <= 'z') ||
-                   (character_to_check >= 'A' && character_to_check <= 'Z') ||
-                   (character_to_check >= '0' && character_to_check <= '9') ||
-                   (character_to_check == '_') {
-                    state.current_byte_offset += 1
-                } else {
-                    break
-                }
-            }
-            lexer_record_diagnostic(
-                state,
-                .InvalidNumberSuffix,
-                .Error,
-                invalid_suffix_start,
-                state.current_byte_offset - invalid_suffix_start,
-                "Invalid number literal suffix.",
-            )
-        }
-    }
+    lexer_validate_number_trailing_characters(state)
 
     token_kind: TokenKind = is_float ? .FloatLiteral : .IntegerLiteral
     lexer_emit_token(state, token_kind, start_offset, state.current_byte_offset, flags)
+}
+
+// Scans a fixed count of hexadecimal digits in `LexerState` and accumulates their numeric value.
+lexer_scan_fixed_hex_digits :: proc(
+    state: ^LexerState,
+    escape_start_offset: int,
+    required_digits: int,
+    error_message: string,
+) -> (value: u32, is_valid: bool) {
+    accumulated_value: u32 = 0
+    digits_found: int = 0
+
+    for digits_found < required_digits && state.current_byte_offset < len(state.source_text) {
+        current_character: u8 = state.source_text[state.current_byte_offset]
+        digit_value: int = hex_digit_to_int(current_character)
+        if digit_value < 0 {
+            break
+        }
+        accumulated_value = (accumulated_value << 4) | u32(digit_value)
+        digits_found += 1
+        state.current_byte_offset += 1
+    }
+
+    if digits_found < required_digits {
+        lexer_record_diagnostic(
+            state,
+            .InvalidEscapeSequence,
+            .Error,
+            escape_start_offset,
+            state.current_byte_offset - escape_start_offset,
+            error_message,
+        )
+
+        return 0, false
+    }
+
+    return accumulated_value, true
 }
 
 // Validates and decodes a single escape sequence starting with a backslash.
@@ -1150,29 +1156,13 @@ lexer_scan_escape_sequence :: proc(
     case '0':
         return 0x00, true
     case 'x':
-        accumulated_value: u32 = 0
-        digits_found: int = 0
-        for digits_found < 2 && state.current_byte_offset < len(state.source_text) {
-            current_character: u8 = state.source_text[state.current_byte_offset]
-            digit_value: int = hex_digit_to_int(current_character)
-            if digit_value < 0 {
-                break
-            }
-            accumulated_value = (accumulated_value << 4) | u32(digit_value)
-            digits_found += 1
-            state.current_byte_offset += 1
-        }
-
-        if digits_found < 2 {
-            lexer_record_diagnostic(
-                state,
-                .InvalidEscapeSequence,
-                .Error,
-                escape_start_offset,
-                state.current_byte_offset - escape_start_offset,
-                "Hexadecimal escape sequence requires 2 hex digits.",
-            )
-
+        accumulated_value, is_valid := lexer_scan_fixed_hex_digits(
+            state,
+            escape_start_offset,
+            2,
+            "Hexadecimal escape sequence requires 2 hex digits.",
+        )
+        if !is_valid {
             return 0, false
         }
 
@@ -1247,55 +1237,22 @@ lexer_scan_escape_sequence :: proc(
         }
 
         state.current_byte_offset = lookahead_offset
-
-        decoded_code_point: u32 = 0
-        if target_length == 2 {
-            byte_0: u32 = u32(sequence_bytes[0] & 0x1F)
-            byte_1: u32 = u32(sequence_bytes[1] & 0x3F)
-            decoded_code_point = (byte_0 << 6) | byte_1
-        } else if target_length == 3 {
-            byte_0: u32 = u32(sequence_bytes[0] & 0x0F)
-            byte_1: u32 = u32(sequence_bytes[1] & 0x3F)
-            byte_2: u32 = u32(sequence_bytes[2] & 0x3F)
-            decoded_code_point = (byte_0 << 12) | (byte_1 << 6) | byte_2
-        } else if target_length == 4 {
-            byte_0: u32 = u32(sequence_bytes[0] & 0x07)
-            byte_1: u32 = u32(sequence_bytes[1] & 0x3F)
-            byte_2: u32 = u32(sequence_bytes[2] & 0x3F)
-            byte_3: u32 = u32(sequence_bytes[3] & 0x3F)
-            decoded_code_point = (byte_0 << 18) | (byte_1 << 12) | (byte_2 << 6) | byte_3
-        }
+        decoded_code_point: u32 = utf8_decode_code_point(string(sequence_bytes[:target_length]), target_length)
 
         return decoded_code_point, true
     case 'u':
-        accumulated_value: u32 = 0
-        digits_found: int = 0
-        for digits_found < 4 && state.current_byte_offset < len(state.source_text) {
-            current_character: u8 = state.source_text[state.current_byte_offset]
-            digit_value: int = hex_digit_to_int(current_character)
-            if digit_value < 0 {
-                break
-            }
-            accumulated_value = (accumulated_value << 4) | u32(digit_value)
-            digits_found += 1
-            state.current_byte_offset += 1
-        }
-
-        if digits_found < 4 {
-            lexer_record_diagnostic(
-                state,
-                .InvalidEscapeSequence,
-                .Error,
-                escape_start_offset,
-                state.current_byte_offset - escape_start_offset,
-                "Unicode escape sequence requires 4 hex digits.",
-            )
-
+        accumulated_value, is_valid := lexer_scan_fixed_hex_digits(
+            state,
+            escape_start_offset,
+            4,
+            "Unicode escape sequence requires 4 hex digits.",
+        )
+        if !is_valid {
             return 0, false
         }
 
         // Check surrogate range
-        if accumulated_value >= 0xD800 && accumulated_value <= 0xDFFF {
+        if unicode_code_point_is_surrogate(accumulated_value) {
             lexer_record_diagnostic(
                 state,
                 .SurrogateUnicodeEscape,
@@ -1310,29 +1267,13 @@ lexer_scan_escape_sequence :: proc(
 
         return accumulated_value, true
     case 'U':
-        accumulated_value: u32 = 0
-        digits_found: int = 0
-        for digits_found < 8 && state.current_byte_offset < len(state.source_text) {
-            current_character: u8 = state.source_text[state.current_byte_offset]
-            digit_value: int = hex_digit_to_int(current_character)
-            if digit_value < 0 {
-                break
-            }
-            accumulated_value = (accumulated_value << 4) | u32(digit_value)
-            digits_found += 1
-            state.current_byte_offset += 1
-        }
-
-        if digits_found < 8 {
-            lexer_record_diagnostic(
-                state,
-                .InvalidEscapeSequence,
-                .Error,
-                escape_start_offset,
-                state.current_byte_offset - escape_start_offset,
-                "Unicode escape sequence requires 8 hex digits.",
-            )
-
+        accumulated_value, is_valid := lexer_scan_fixed_hex_digits(
+            state,
+            escape_start_offset,
+            8,
+            "Unicode escape sequence requires 8 hex digits.",
+        )
+        if !is_valid {
             return 0, false
         }
 
@@ -1349,7 +1290,7 @@ lexer_scan_escape_sequence :: proc(
             return accumulated_value, false
         }
 
-        if accumulated_value >= 0xD800 && accumulated_value <= 0xDFFF {
+        if unicode_code_point_is_surrogate(accumulated_value) {
             lexer_record_diagnostic(
                 state,
                 .SurrogateUnicodeEscape,
@@ -1483,41 +1424,14 @@ lexer_scan_character_or_rune :: proc(state: ^LexerState) {
             continue
         }
 
-        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-        if !is_valid_utf8 {
-            lexer_record_diagnostic(
-                state,
-                .MalformedUtf8Sequence,
-                .Error,
-                state.current_byte_offset,
-                1,
-                "Malformed UTF-8 sequence inside character literal.",
-            )
-            state.current_byte_offset += 1
-            code_point_count += 1
-        } else {
-            // Decode scalar code point
-            if sequence_length == 1 {
-                last_code_point = u32(state.source_text[state.current_byte_offset])
-            } else if sequence_length == 2 {
-                byte_0: u32 = u32(state.source_text[state.current_byte_offset] & 0x1F)
-                byte_1: u32 = u32(state.source_text[state.current_byte_offset + 1] & 0x3F)
-                last_code_point = (byte_0 << 6) | byte_1
-            } else if sequence_length == 3 {
-                byte_0: u32 = u32(state.source_text[state.current_byte_offset] & 0x0F)
-                byte_1: u32 = u32(state.source_text[state.current_byte_offset + 1] & 0x3F)
-                byte_2: u32 = u32(state.source_text[state.current_byte_offset + 2] & 0x3F)
-                last_code_point = (byte_0 << 12) | (byte_1 << 6) | byte_2
-            } else if sequence_length == 4 {
-                byte_0: u32 = u32(state.source_text[state.current_byte_offset] & 0x07)
-                byte_1: u32 = u32(state.source_text[state.current_byte_offset + 1] & 0x3F)
-                byte_2: u32 = u32(state.source_text[state.current_byte_offset + 2] & 0x3F)
-                byte_3: u32 = u32(state.source_text[state.current_byte_offset + 3] & 0x3F)
-                last_code_point = (byte_0 << 18) | (byte_1 << 12) | (byte_2 << 6) | byte_3
-            }
-            state.current_byte_offset += sequence_length
-            code_point_count += 1
+        decoded_code_point, is_valid_utf8 := lexer_advance_utf8_character(
+            state,
+            "Malformed UTF-8 sequence inside character literal.",
+        )
+        if is_valid_utf8 {
+            last_code_point = decoded_code_point
         }
+        code_point_count += 1
     }
 
     if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\'' {
@@ -1566,68 +1480,20 @@ lexer_scan_raw_string :: proc(state: ^LexerState) {
             break
         }
 
-        current_character: u8 = state.source_text[state.current_byte_offset]
-        if current_character == '\r' {
-            state.current_byte_offset += 1
-            if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\n' {
-                state.current_byte_offset += 1
-            }
-            append(&state.line_start_offsets, u32(state.current_byte_offset))
+        if lexer_consume_newline(state) {
             continue
         }
 
-        if current_character == '\n' {
-            state.current_byte_offset += 1
-            append(&state.line_start_offsets, u32(state.current_byte_offset))
-            continue
-        }
-
-        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-        if !is_valid_utf8 {
-            lexer_record_diagnostic(
-                state,
-                .MalformedUtf8Sequence,
-                .Error,
-                state.current_byte_offset,
-                1,
-                "Malformed UTF-8 sequence in raw string.",
-            )
-            state.current_byte_offset += 1
-        } else {
-            state.current_byte_offset += sequence_length
-        }
+        lexer_advance_utf8_character(state, "Malformed UTF-8 sequence in raw string.")
     }
 
     if !found_closing_quotes {
         for state.current_byte_offset < len(state.source_text) {
-            current_character: u8 = state.source_text[state.current_byte_offset]
-            if current_character == '\r' {
-                state.current_byte_offset += 1
-                if state.current_byte_offset < len(state.source_text) && state.source_text[state.current_byte_offset] == '\n' {
-                    state.current_byte_offset += 1
-                }
-                append(&state.line_start_offsets, u32(state.current_byte_offset))
+            if lexer_consume_newline(state) {
                 continue
             }
-            if current_character == '\n' {
-                state.current_byte_offset += 1
-                append(&state.line_start_offsets, u32(state.current_byte_offset))
-                continue
-            }
-            sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-            if !is_valid_utf8 {
-                lexer_record_diagnostic(
-                    state,
-                    .MalformedUtf8Sequence,
-                    .Error,
-                    state.current_byte_offset,
-                    1,
-                    "Malformed UTF-8 sequence in raw string.",
-                )
-                state.current_byte_offset += 1
-            } else {
-                state.current_byte_offset += sequence_length
-            }
+
+            lexer_advance_utf8_character(state, "Malformed UTF-8 sequence in raw string.")
         }
 
         lexer_record_diagnostic(
@@ -1733,19 +1599,36 @@ lexer_scan_raw_string :: proc(state: ^LexerState) {
     lexer_emit_token(state, .RawStringLiteral, start_offset, state.current_byte_offset)
 }
 
-// Scans standard double-quoted strings and initiates string interpolation contexts.
-lexer_scan_string_literal :: proc(state: ^LexerState) {
+// Scans a standard double-quoted string literal or resumes an active string interpolation segment in `LexerState`.
+lexer_scan_string_segment :: proc(state: ^LexerState, is_resuming_interpolation: bool) {
     start_offset: int = state.current_byte_offset
-    state.current_byte_offset += 1 // Skip opening quote "
+    if !is_resuming_interpolation {
+        state.current_byte_offset += 1 // Skip opening quote "
+    }
 
     flags: TokenFlags = {}
+
+    closing_token_kind: TokenKind = .StringLiteral
+    newline_error_message: string = "String literal must not span across newlines."
+    utf8_error_message: string = "Malformed UTF-8 sequence inside string literal."
+    eof_error_message: string = "Unclosed string literal reaches end of file."
+
+    if is_resuming_interpolation {
+        closing_token_kind = .InterpolatedStringEnd
+        newline_error_message = "Interpolated string segment must not span across newlines."
+        utf8_error_message = "Malformed UTF-8 sequence inside interpolated string."
+        eof_error_message = "Unclosed interpolated string reaches end of file."
+    }
 
     for state.current_byte_offset < len(state.source_text) {
         current_character: u8 = state.source_text[state.current_byte_offset]
 
         if current_character == '"' {
-            state.current_byte_offset += 1 // Consume closing quote
-            lexer_emit_token(state, .StringLiteral, start_offset, state.current_byte_offset, flags)
+            state.current_byte_offset += 1 // Consume closing quote "
+            lexer_emit_token(state, closing_token_kind, start_offset, state.current_byte_offset, flags)
+            if is_resuming_interpolation {
+                pop(&state.interpolation_stack)
+            }
 
             return
         }
@@ -1757,9 +1640,12 @@ lexer_scan_string_literal :: proc(state: ^LexerState) {
                 .Error,
                 start_offset,
                 state.current_byte_offset - start_offset,
-                "String literal must not span across newlines.",
+                newline_error_message,
             )
-            lexer_emit_token(state, .StringLiteral, start_offset, state.current_byte_offset, flags)
+            lexer_emit_token(state, closing_token_kind, start_offset, state.current_byte_offset, flags)
+            if is_resuming_interpolation {
+                pop(&state.interpolation_stack)
+            }
 
             return
         }
@@ -1770,130 +1656,20 @@ lexer_scan_string_literal :: proc(state: ^LexerState) {
             if state.current_byte_offset + 1 < len(state.source_text) &&
                state.source_text[state.current_byte_offset + 1] == '(' {
                 interpolation_start_offset: int = state.current_byte_offset
-                // Emit opening string segment
-                lexer_emit_token(
-                    state,
-                    .InterpolatedStringStart,
-                    start_offset,
-                    interpolation_start_offset,
-                    flags,
-                )
-                // Emit \( delimiter
+                segment_kind: TokenKind = is_resuming_interpolation ? .InterpolatedStringMiddle : .InterpolatedStringStart
+                lexer_emit_token(state, segment_kind, start_offset, interpolation_start_offset, flags)
+
                 state.current_byte_offset += 2
-                lexer_emit_token(
-                    state,
-                    .InterpolationStart,
-                    interpolation_start_offset,
-                    state.current_byte_offset,
-                )
-                // Push interpolation frame
-                append(&state.interpolation_stack, InterpolationFrame{
-                    parenthesis_depth = 0,
-                })
+                lexer_emit_token(state, .InterpolationStart, interpolation_start_offset, state.current_byte_offset)
 
-                return
-            }
-
-            // Normal escape sequence
-            lexer_scan_escape_sequence(state, false)
-            continue
-        }
-
-        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-        if !is_valid_utf8 {
-            lexer_record_diagnostic(
-                state,
-                .MalformedUtf8Sequence,
-                .Error,
-                state.current_byte_offset,
-                1,
-                "Malformed UTF-8 sequence inside string literal.",
-            )
-            state.current_byte_offset += 1
-        } else {
-            state.current_byte_offset += sequence_length
-        }
-    }
-
-    lexer_record_diagnostic(
-        state,
-        .UnterminatedStringLiteral,
-        .Error,
-        start_offset,
-        state.current_byte_offset - start_offset,
-        "Unclosed string literal reaches end of file.",
-    )
-    lexer_emit_token(state, .StringLiteral, start_offset, state.current_byte_offset, flags)
-}
-
-// Resumes scanning an enclosing string literal following an interpolation closing parenthesis.
-lexer_resume_interpolated_string :: proc(state: ^LexerState) {
-    segment_start_offset: int = state.current_byte_offset
-    flags: TokenFlags = {}
-
-    for state.current_byte_offset < len(state.source_text) {
-        current_character: u8 = state.source_text[state.current_byte_offset]
-
-        if current_character == '"' {
-            state.current_byte_offset += 1 // Consume closing quote "
-            lexer_emit_token(
-                state,
-                .InterpolatedStringEnd,
-                segment_start_offset,
-                state.current_byte_offset,
-                flags,
-            )
-            pop(&state.interpolation_stack)
-
-            return
-        }
-
-        if current_character == '\n' || current_character == '\r' {
-            lexer_record_diagnostic(
-                state,
-                .UnterminatedStringLiteral,
-                .Error,
-                segment_start_offset,
-                state.current_byte_offset - segment_start_offset,
-                "Interpolated string segment must not span across newlines.",
-            )
-            lexer_emit_token(
-                state,
-                .InterpolatedStringEnd,
-                segment_start_offset,
-                state.current_byte_offset,
-                flags,
-            )
-            pop(&state.interpolation_stack)
-
-            return
-        }
-
-        if current_character == '\\' {
-            flags += {.HasEscapeSequences}
-            // Check for next interpolation delimiter \(
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '(' {
-                interpolation_start_offset: int = state.current_byte_offset
-                // Emit middle string segment
-                lexer_emit_token(
-                    state,
-                    .InterpolatedStringMiddle,
-                    segment_start_offset,
-                    interpolation_start_offset,
-                    flags,
-                )
-                // Emit \( delimiter
-                state.current_byte_offset += 2
-                lexer_emit_token(
-                    state,
-                    .InterpolationStart,
-                    interpolation_start_offset,
-                    state.current_byte_offset,
-                )
-                // Reset frame parenthesis depth
-                if len(state.interpolation_stack) > 0 {
-                    state.interpolation_stack[len(state.interpolation_stack) - 1].parenthesis_depth = 0
+                if is_resuming_interpolation {
+                    if len(state.interpolation_stack) > 0 {
+                        state.interpolation_stack[len(state.interpolation_stack) - 1].parenthesis_depth = 0
+                    }
+                } else {
+                    append(&state.interpolation_stack, InterpolationFrame{
+                        parenthesis_depth = 0,
+                    })
                 }
 
                 return
@@ -1904,38 +1680,60 @@ lexer_resume_interpolated_string :: proc(state: ^LexerState) {
             continue
         }
 
-        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
-        if !is_valid_utf8 {
-            lexer_record_diagnostic(
-                state,
-                .MalformedUtf8Sequence,
-                .Error,
-                state.current_byte_offset,
-                1,
-                "Malformed UTF-8 sequence inside interpolated string.",
-            )
-            state.current_byte_offset += 1
-        } else {
-            state.current_byte_offset += sequence_length
-        }
+        lexer_advance_utf8_character(state, utf8_error_message)
     }
 
     lexer_record_diagnostic(
         state,
         .UnterminatedStringLiteral,
         .Error,
-        segment_start_offset,
-        state.current_byte_offset - segment_start_offset,
-        "Unclosed interpolated string reaches end of file.",
+        start_offset,
+        state.current_byte_offset - start_offset,
+        eof_error_message,
     )
-    lexer_emit_token(
-        state,
-        .InterpolatedStringEnd,
-        segment_start_offset,
-        state.current_byte_offset,
-        flags,
-    )
-    pop(&state.interpolation_stack)
+    lexer_emit_token(state, closing_token_kind, start_offset, state.current_byte_offset, flags)
+    if is_resuming_interpolation {
+        pop(&state.interpolation_stack)
+    }
+}
+
+// Scans standard double-quoted strings and initiates string interpolation contexts in `LexerState`.
+lexer_scan_string_literal :: proc(state: ^LexerState) {
+    lexer_scan_string_segment(state, false)
+}
+
+// Resumes scanning an enclosing string literal in `LexerState` following an interpolation closing parenthesis.
+lexer_resume_interpolated_string :: proc(state: ^LexerState) {
+    lexer_scan_string_segment(state, true)
+}
+
+// Scans an arithmetic operator, its compound assignment form, or its guarded assignment form in `LexerState`.
+lexer_scan_arithmetic_operator :: proc(
+    state: ^LexerState,
+    start_offset: int,
+    base_kind: TokenKind,
+    assign_kind: TokenKind,
+    guard_kind: TokenKind,
+) {
+    if state.current_byte_offset + 2 < len(state.source_text) &&
+       state.source_text[state.current_byte_offset + 1] == '=' &&
+       state.source_text[state.current_byte_offset + 2] == '^' {
+        state.current_byte_offset += 3
+        lexer_emit_token(state, guard_kind, start_offset, state.current_byte_offset)
+
+        return
+    }
+
+    if state.current_byte_offset + 1 < len(state.source_text) &&
+       state.source_text[state.current_byte_offset + 1] == '=' {
+        state.current_byte_offset += 2
+        lexer_emit_token(state, assign_kind, start_offset, state.current_byte_offset)
+
+        return
+    }
+
+    state.current_byte_offset += 1
+    lexer_emit_token(state, base_kind, start_offset, state.current_byte_offset)
 }
 
 // Tokenizes an entire UTF-8 source buffer into a self-contained `LexedSourceFile`.
@@ -1996,9 +1794,7 @@ lexer_tokenize_source :: proc(
         current_character: u8 = state.source_text[state.current_byte_offset]
 
         // Identifiers and keywords
-        if (current_character >= 'A' && current_character <= 'Z') ||
-           (current_character >= 'a' && current_character <= 'z') ||
-           (current_character == '_') {
+        if character_is_identifier_start(current_character) {
             lexer_scan_identifier(&state)
             continue
         }
@@ -2010,7 +1806,7 @@ lexer_tokenize_source :: proc(
         }
 
         // Numeric literals
-        if current_character >= '0' && current_character <= '9' {
+        if character_is_ascii_digit(current_character) {
             lexer_scan_number(&state)
             continue
         }
@@ -2281,108 +2077,37 @@ lexer_tokenize_source :: proc(
 
         // Plus operators: +=^, +=, +
         if current_character == '+' {
-            if state.current_byte_offset + 2 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' &&
-               state.source_text[state.current_byte_offset + 2] == '^' {
-                state.current_byte_offset += 3
-                lexer_emit_token(&state, .PlusAssignGuard, start_offset, state.current_byte_offset)
-                continue
-            }
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' {
-                state.current_byte_offset += 2
-                lexer_emit_token(&state, .PlusAssign, start_offset, state.current_byte_offset)
-                continue
-            }
-            state.current_byte_offset += 1
-            lexer_emit_token(&state, .Plus, start_offset, state.current_byte_offset)
+            lexer_scan_arithmetic_operator(&state, start_offset, .Plus, .PlusAssign, .PlusAssignGuard)
             continue
         }
 
         // Minus operators: -=^, -=, ->, -
         if current_character == '-' {
-            if state.current_byte_offset + 2 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' &&
-               state.source_text[state.current_byte_offset + 2] == '^' {
-                state.current_byte_offset += 3
-                lexer_emit_token(&state, .MinusAssignGuard, start_offset, state.current_byte_offset)
+            if state.current_byte_offset + 1 < len(state.source_text) &&
+               state.source_text[state.current_byte_offset + 1] == '>' {
+                state.current_byte_offset += 2
+                lexer_emit_token(&state, .ThinArrow, start_offset, state.current_byte_offset)
                 continue
             }
-            if state.current_byte_offset + 1 < len(state.source_text) {
-                next_character: u8 = state.source_text[state.current_byte_offset + 1]
-                if next_character == '=' {
-                    state.current_byte_offset += 2
-                    lexer_emit_token(&state, .MinusAssign, start_offset, state.current_byte_offset)
-                    continue
-                }
-                if next_character == '>' {
-                    state.current_byte_offset += 2
-                    lexer_emit_token(&state, .ThinArrow, start_offset, state.current_byte_offset)
-                    continue
-                }
-            }
-            state.current_byte_offset += 1
-            lexer_emit_token(&state, .Minus, start_offset, state.current_byte_offset)
+            lexer_scan_arithmetic_operator(&state, start_offset, .Minus, .MinusAssign, .MinusAssignGuard)
             continue
         }
 
         // Star operators: *=^, *=, *
         if current_character == '*' {
-            if state.current_byte_offset + 2 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' &&
-               state.source_text[state.current_byte_offset + 2] == '^' {
-                state.current_byte_offset += 3
-                lexer_emit_token(&state, .StarAssignGuard, start_offset, state.current_byte_offset)
-                continue
-            }
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' {
-                state.current_byte_offset += 2
-                lexer_emit_token(&state, .StarAssign, start_offset, state.current_byte_offset)
-                continue
-            }
-            state.current_byte_offset += 1
-            lexer_emit_token(&state, .Star, start_offset, state.current_byte_offset)
+            lexer_scan_arithmetic_operator(&state, start_offset, .Star, .StarAssign, .StarAssignGuard)
             continue
         }
 
         // Slash operators: /=^, /=, /
         if current_character == '/' {
-            if state.current_byte_offset + 2 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' &&
-               state.source_text[state.current_byte_offset + 2] == '^' {
-                state.current_byte_offset += 3
-                lexer_emit_token(&state, .SlashAssignGuard, start_offset, state.current_byte_offset)
-                continue
-            }
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' {
-                state.current_byte_offset += 2
-                lexer_emit_token(&state, .SlashAssign, start_offset, state.current_byte_offset)
-                continue
-            }
-            state.current_byte_offset += 1
-            lexer_emit_token(&state, .Slash, start_offset, state.current_byte_offset)
+            lexer_scan_arithmetic_operator(&state, start_offset, .Slash, .SlashAssign, .SlashAssignGuard)
             continue
         }
 
         // Percent operators: %=^, %=, %
         if current_character == '%' {
-            if state.current_byte_offset + 2 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' &&
-               state.source_text[state.current_byte_offset + 2] == '^' {
-                state.current_byte_offset += 3
-                lexer_emit_token(&state, .PercentAssignGuard, start_offset, state.current_byte_offset)
-                continue
-            }
-            if state.current_byte_offset + 1 < len(state.source_text) &&
-               state.source_text[state.current_byte_offset + 1] == '=' {
-                state.current_byte_offset += 2
-                lexer_emit_token(&state, .PercentAssign, start_offset, state.current_byte_offset)
-                continue
-            }
-            state.current_byte_offset += 1
-            lexer_emit_token(&state, .Percent, start_offset, state.current_byte_offset)
+            lexer_scan_arithmetic_operator(&state, start_offset, .Percent, .PercentAssign, .PercentAssignGuard)
             continue
         }
 

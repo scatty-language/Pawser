@@ -27,60 +27,14 @@ source_file_is_valid_identifier_name :: proc(identifier_name: string) -> bool {
         return false
     }
 
-    // Verify all characters are ASCII alphanumeric or underscore
-    underscore_count: int = 0
     for character_index in 0 ..< identifier_length {
         current_character: u8 = identifier_name[character_index]
-        is_alphanumeric_or_underscore: bool = (current_character >= 'A' && current_character <= 'Z') ||
-                                              (current_character >= 'a' && current_character <= 'z') ||
-                                              (current_character >= '0' && current_character <= '9') ||
-                                              (current_character == '_')
-        if !is_alphanumeric_or_underscore {
+        if !character_is_identifier_part(current_character) {
             return false
         }
-        if current_character == '_' {
-            underscore_count += 1
-        }
     }
 
-    first_character: u8 = identifier_name[0]
-
-    // PublicIdentifier: starts with uppercase letter and contains no underscores
-    if first_character >= 'A' && first_character <= 'Z' {
-        if underscore_count == 0 {
-            return true
-        }
-
-        // InternalIdentifier: starts with uppercase letter and ends with a single underscore
-        if underscore_count == 1 && identifier_name[identifier_length - 1] == '_' {
-            return true
-        }
-
-        return false
-    }
-
-    // PrivateIdentifier: starts with underscore followed by a lowercase letter and contains no other underscores
-    if first_character == '_' {
-        if identifier_length >= 2 &&
-           identifier_name[1] >= 'a' &&
-           identifier_name[1] <= 'z' &&
-           underscore_count == 1 {
-            return true
-        }
-
-        return false
-    }
-
-    // LocalIdentifier: starts with lowercase letter and contains no underscores
-    if first_character >= 'a' && first_character <= 'z' {
-        if underscore_count == 0 {
-            return true
-        }
-
-        return false
-    }
-
-    return false
+    return identifier_classify_format(identifier_name) != .MalformedIdentifier
 }
 
 // Validates a file path against language extension and canonical conditional suffix ordering rules.
@@ -159,7 +113,7 @@ source_file_validate_path :: proc(
 
     metadata.base_name = segments[0]
 
-    // Validate base name format against Scatty identifier rules
+    // Validate base name format against identifier rules
     if !source_file_is_valid_identifier_name(metadata.base_name) {
         metadata.is_valid = false
         append(&metadata.diagnostics, LexerDiagnostic{
