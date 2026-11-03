@@ -257,6 +257,12 @@ lexer_emit_token :: proc(
                     // Report unclosed delimiters for skipped opening delimiters
                     for unclosed_index := found_match_index + 1; unclosed_index <= top_index; unclosed_index += 1 {
                         unclosed_entry: DelimiterStackEntry = state.delimiter_stack[unclosed_index]
+                        if unclosed_entry.kind == .LeftParenthesis && len(state.interpolation_stack) > 0 {
+                            top_frame_index: int = len(state.interpolation_stack) - 1
+                            if state.interpolation_stack[top_frame_index].parenthesis_depth > 0 {
+                                state.interpolation_stack[top_frame_index].parenthesis_depth -= 1
+                            }
+                        }
                         lexer_record_diagnostic(
                             state,
                             .UnclosedDelimiter,
@@ -307,6 +313,38 @@ lexer_emit_token :: proc(
     state.preceded_by_newline    = false
 }
 
+// Unwinds the delimiter stack back to and including the active `InterpolationStart` delimiter and pops the interpolation frame.
+lexer_unwind_active_interpolation :: proc(state: ^LexerState) {
+    if len(state.interpolation_stack) == 0 {
+        return
+    }
+
+    interpolation_start_index: int = -1
+    for search_index := len(state.delimiter_stack) - 1; search_index >= 0; search_index -= 1 {
+        if state.delimiter_stack[search_index].kind == .InterpolationStart {
+            interpolation_start_index = search_index
+            break
+        }
+    }
+
+    if interpolation_start_index >= 0 {
+        for unclosed_index := len(state.delimiter_stack) - 1; unclosed_index >= interpolation_start_index; unclosed_index -= 1 {
+            unclosed_entry: DelimiterStackEntry = state.delimiter_stack[unclosed_index]
+            lexer_record_diagnostic(
+                state,
+                .UnclosedDelimiter,
+                .Error,
+                int(state.tokens[unclosed_entry.token_index].span.byte_offset),
+                int(state.tokens[unclosed_entry.token_index].span.byte_length),
+                "Unclosed delimiter.",
+            )
+        }
+        resize(&state.delimiter_stack, interpolation_start_index)
+    }
+
+    pop(&state.interpolation_stack)
+}
+
 // Skips whitespace characters and single/multi-line comments while recording line starting offsets.
 lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
     for state.current_byte_offset < len(state.source_text) {
@@ -321,6 +359,9 @@ lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
 
         // Carriage Return and Line Feed
         if current_character == '\r' {
+            for len(state.interpolation_stack) > 0 {
+                lexer_unwind_active_interpolation(state)
+            }
             state.preceded_by_whitespace = true
             state.preceded_by_newline    = true
             state.current_byte_offset += 1
@@ -332,6 +373,9 @@ lexer_skip_whitespace_and_comments :: proc(state: ^LexerState) {
         }
 
         if current_character == '\n' {
+            for len(state.interpolation_stack) > 0 {
+                lexer_unwind_active_interpolation(state)
+            }
             state.preceded_by_whitespace = true
             state.preceded_by_newline    = true
             state.current_byte_offset += 1
@@ -1138,71 +1182,71 @@ lexer_scan_escape_sequence :: proc(
         }
 
         // byte_value >= 0x80: multi-byte UTF-8 sequence via adjacent \xHH escapes
-                target_length: int = 0
-                if byte_value >= 0xC2 && byte_value <= 0xDF {
-                    target_length = 2
-                } else if byte_value >= 0xE0 && byte_value <= 0xEF {
-                    target_length = 3
-                } else if byte_value >= 0xF0 && byte_value <= 0xF4 {
-                    target_length = 4
+        target_length: int = 0
+        if byte_value >= 0xC2 && byte_value <= 0xDF {
+            target_length = 2
+        } else if byte_value >= 0xE0 && byte_value <= 0xEF {
+            target_length = 3
+        } else if byte_value >= 0xF0 && byte_value <= 0xF4 {
+            target_length = 4
+        }
+
+        if target_length == 0 {
+            lexer_record_diagnostic(
+                state,
+                .MalformedUtf8EscapeSequence,
+                .Error,
+                escape_start_offset,
+                state.current_byte_offset - escape_start_offset,
+                "Hexadecimal escape sequence produces malformed UTF-8.",
+            )
+
+            return u32(byte_value), false
+        }
+
+        sequence_bytes: [4]u8
+        sequence_bytes[0] = byte_value
+        consecutive_count: int = 1
+        lookahead_offset: int = state.current_byte_offset
+
+        for consecutive_count < target_length {
+            if lookahead_offset + 3 < len(state.source_text) &&
+               state.source_text[lookahead_offset] == '\\' &&
+               state.source_text[lookahead_offset + 1] == 'x' {
+                first_digit: int = hex_digit_to_int(state.source_text[lookahead_offset + 2])
+                second_digit: int = hex_digit_to_int(state.source_text[lookahead_offset + 3])
+                if first_digit >= 0 && second_digit >= 0 {
+                    next_byte: u8 = u8((first_digit << 4) | second_digit)
+                    sequence_bytes[consecutive_count] = next_byte
+                    consecutive_count += 1
+                    lookahead_offset += 4
+                    continue
                 }
+            }
+            break
+        }
 
-                if target_length == 0 {
-                    lexer_record_diagnostic(
-                        state,
-                        .MalformedUtf8EscapeSequence,
-                        .Error,
-                        escape_start_offset,
-                        state.current_byte_offset - escape_start_offset,
-                        "Hexadecimal escape sequence produces malformed UTF-8.",
-                    )
+        is_sequence_valid: bool = false
+        if consecutive_count == target_length {
+            slice_as_string: string = string(sequence_bytes[:target_length])
+            _, is_sequence_valid = utf8_validate_sequence(slice_as_string, 0)
+        }
 
-                    return u32(byte_value), false
-                }
-
-                sequence_bytes: [4]u8
-                sequence_bytes[0] = byte_value
-                consecutive_count: int = 1
-                lookahead_offset: int = state.current_byte_offset
-
-                for consecutive_count < target_length {
-                    if lookahead_offset + 3 < len(state.source_text) &&
-                       state.source_text[lookahead_offset] == '\\' &&
-                       state.source_text[lookahead_offset + 1] == 'x' {
-                        first_digit: int = hex_digit_to_int(state.source_text[lookahead_offset + 2])
-                        second_digit: int = hex_digit_to_int(state.source_text[lookahead_offset + 3])
-                        if first_digit >= 0 && second_digit >= 0 {
-                            next_byte: u8 = u8((first_digit << 4) | second_digit)
-                            sequence_bytes[consecutive_count] = next_byte
-                            consecutive_count += 1
-                            lookahead_offset += 4
-                            continue
-                        }
-                    }
-                    break
-                }
-
-                is_sequence_valid: bool = false
-                if consecutive_count == target_length {
-                    slice_as_string: string = string(sequence_bytes[:target_length])
-                    _, is_sequence_valid = utf8_validate_sequence(slice_as_string, 0)
-                }
-
-                if !is_sequence_valid {
+        if !is_sequence_valid {
             state.current_byte_offset = lookahead_offset
-                    lexer_record_diagnostic(
-                        state,
-                        .MalformedUtf8EscapeSequence,
-                        .Error,
-                        escape_start_offset,
-                        state.current_byte_offset - escape_start_offset,
-                        "Hexadecimal escape sequence produces malformed UTF-8.",
-                    )
+            lexer_record_diagnostic(
+                state,
+                .MalformedUtf8EscapeSequence,
+                .Error,
+                escape_start_offset,
+                state.current_byte_offset - escape_start_offset,
+                "Hexadecimal escape sequence produces malformed UTF-8.",
+            )
 
-                    return u32(byte_value), false
-                }
+            return u32(byte_value), false
+        }
 
-                state.current_byte_offset = lookahead_offset
+        state.current_byte_offset = lookahead_offset
 
         decoded_code_point: u32 = 0
         if target_length == 2 {
@@ -1979,6 +2023,33 @@ lexer_tokenize_source :: proc(
 
         // Raw strings (""") vs standard strings (")
         if current_character == '"' {
+            if len(state.interpolation_stack) > 0 {
+                has_closing_quote_on_line: bool = false
+                lookahead_offset: int = state.current_byte_offset + 1
+                for lookahead_offset < len(state.source_text) {
+                    character_at_lookahead: u8 = state.source_text[lookahead_offset]
+                    if character_at_lookahead == '\n' || character_at_lookahead == '\r' {
+                        break
+                    }
+                    if character_at_lookahead == '\\' {
+                        lookahead_offset += 2
+                        continue
+                    }
+                    if character_at_lookahead == '"' {
+                        has_closing_quote_on_line = true
+                        break
+                    }
+                    lookahead_offset += 1
+                }
+
+                if !has_closing_quote_on_line {
+                    state.current_byte_offset += 1
+                    lexer_unwind_active_interpolation(&state)
+                    lexer_emit_token(&state, .InterpolatedStringEnd, start_offset, state.current_byte_offset)
+                    continue
+                }
+            }
+
             if state.current_byte_offset + 2 < len(state.source_text) &&
                state.source_text[state.current_byte_offset + 1] == '"' &&
                state.source_text[state.current_byte_offset + 2] == '"' {
@@ -2003,7 +2074,11 @@ lexer_tokenize_source :: proc(
             state.current_byte_offset += 1
             if len(state.interpolation_stack) > 0 {
                 top_frame_index: int = len(state.interpolation_stack) - 1
-                if state.interpolation_stack[top_frame_index].parenthesis_depth == 0 {
+                is_interpolation_closing: bool = state.interpolation_stack[top_frame_index].parenthesis_depth == 0 ||
+                    (len(state.delimiter_stack) > 0 && state.delimiter_stack[len(state.delimiter_stack) - 1].kind == .InterpolationStart)
+
+                if is_interpolation_closing {
+                    state.interpolation_stack[top_frame_index].parenthesis_depth = 0
                     // Check if previous token was InterpolationStart (empty interpolation check)
                     if len(state.tokens) > 0 && state.tokens[len(state.tokens) - 1].kind == .InterpolationStart {
                         lexer_record_diagnostic(
