@@ -324,3 +324,143 @@ literal_test_exponent_without_decimal_point :: proc(test_context: ^testing.T) {
     testing.expect_value(test_context, lexed_file.tokens[0].kind, pawser.TokenKind.FloatLiteral)
     testing.expect_value(test_context, lexed_file.tokens[1].kind, pawser.TokenKind.FloatLiteral)
 }
+
+// Verifies that malformed integer literals immediately preceding a dot or range operator emit MalformedNumberLiteral diagnostics.
+@(test)
+literal_test_malformed_integer_before_dot_and_range :: proc(test_context: ^testing.T) {
+    source_code: string = "1__000..10 1_000_.ToString() 0_..5"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    malformed_number_error_count: int = 0
+    for diagnostic in lexed_file.diagnostics {
+        if diagnostic.code == .MalformedNumberLiteral {
+            malformed_number_error_count += 1
+        }
+    }
+
+    testing.expect_value(test_context, malformed_number_error_count, 3)
+
+    // Verify that range and member access tokens are still emitted properly after recovery
+    testing.expect_value(test_context, lexed_file.tokens[0].kind, pawser.TokenKind.IntegerLiteral)
+    testing.expect_value(test_context, lexed_file.tokens[1].kind, pawser.TokenKind.DoubleDot)
+    testing.expect_value(test_context, lexed_file.tokens[2].kind, pawser.TokenKind.IntegerLiteral)
+
+    testing.expect_value(test_context, lexed_file.tokens[3].kind, pawser.TokenKind.IntegerLiteral)
+    testing.expect_value(test_context, lexed_file.tokens[4].kind, pawser.TokenKind.Dot)
+    testing.expect_value(test_context, lexed_file.tokens[5].kind, pawser.TokenKind.PublicIdentifier)
+}
+
+// Verifies that a trailing backslash before a physical newline does not swallow the newline or merge lines into a single-line literal.
+@(test)
+literal_test_backslash_before_newline_in_string_and_char :: proc(test_context: ^testing.T) {
+    // Line 1 has an unclosed string ending with '\' right before '\n'
+    // Line 2 has normal code that must not be swallowed into the string literal
+    string_source: string = "\"hello \\\nnextLineVar := 42;"
+    lexed_string: pawser.LexedSourceFile = pawser.lexer_tokenize_source(string_source)
+    defer pawser.lexed_source_file_destroy(&lexed_string)
+
+    // Both physical lines must be recorded in line_start_offsets
+    testing.expect_value(test_context, len(lexed_string.line_start_offsets), 2)
+
+    found_unterminated_string: bool = false
+    for diagnostic in lexed_string.diagnostics {
+        if diagnostic.code == .UnterminatedStringLiteral {
+            found_unterminated_string = true
+        }
+    }
+    testing.expect(test_context, found_unterminated_string, "Expected UnterminatedStringLiteral when backslash precedes newline")
+
+    // Verify that 'nextLineVar' on line 2 is tokenized as a LocalIdentifier preceded by a newline
+    testing.expect_value(test_context, lexed_string.tokens[0].kind, pawser.TokenKind.StringLiteral)
+    testing.expect_value(test_context, lexed_string.tokens[1].kind, pawser.TokenKind.LocalIdentifier)
+    testing.expect_value(test_context, pawser.token_extract_lexeme(lexed_string.tokens[1], string_source), "nextLineVar")
+    testing.expect(test_context, pawser.TokenFlag.PrecededByNewline in lexed_string.tokens[1].flags, "Expected PrecededByNewline on line 2 token")
+
+    // Character literal with backslash immediately before CRLF
+    char_source: string = "'\\\r\nafterChar := 1;"
+    lexed_char: pawser.LexedSourceFile = pawser.lexer_tokenize_source(char_source)
+    defer pawser.lexed_source_file_destroy(&lexed_char)
+
+    testing.expect_value(test_context, len(lexed_char.line_start_offsets), 2)
+    testing.expect_value(test_context, lexed_char.tokens[1].kind, pawser.TokenKind.LocalIdentifier)
+    testing.expect_value(test_context, pawser.token_extract_lexeme(lexed_char.tokens[1], char_source), "afterChar")
+}
+
+// Verifies that an invalid escape sequence followed by a multi-byte UTF-8 character advances past the full code point without false UTF-8 errors.
+@(test)
+literal_test_invalid_multibyte_utf8_escape_in_string_and_char :: proc(test_context: ^testing.T) {
+    source_code: string = "\"\\Я\" '\\🔥'"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    invalid_escape_count: int = 0
+    malformed_utf8_count: int = 0
+    multi_char_count: int = 0
+
+    for diagnostic in lexed_file.diagnostics {
+        if diagnostic.code == .InvalidEscapeSequence {
+            invalid_escape_count += 1
+        }
+        if diagnostic.code == .MalformedUtf8Sequence {
+            malformed_utf8_count += 1
+        }
+        if diagnostic.code == .MultiCharacterLiteral {
+            multi_char_count += 1
+        }
+    }
+
+    testing.expect_value(test_context, invalid_escape_count, 2)
+    testing.expect_value(test_context, malformed_utf8_count, 0)
+    testing.expect_value(test_context, multi_char_count, 0)
+}
+
+// Verifies that adjacent hex escapes forming valid UTF-8 in rune literals succeed and malformed multi-byte hex escapes in strings emit one diagnostic.
+@(test)
+literal_test_hex_escape_multibyte_utf8_in_rune_and_string :: proc(test_context: ^testing.T) {
+    // '\xD0\xAF' encodes U+042F ('Я') in UTF-8 and must be accepted as a valid RuneLiteral
+    valid_rune_source: string = "'\\xD0\\xAF'"
+    lexed_rune: pawser.LexedSourceFile = pawser.lexer_tokenize_source(valid_rune_source)
+    defer pawser.lexed_source_file_destroy(&lexed_rune)
+
+    testing.expect_value(test_context, len(lexed_rune.diagnostics), 0)
+    testing.expect_value(test_context, lexed_rune.tokens[0].kind, pawser.TokenKind.RuneLiteral)
+
+    // "\xC2\xFF" (invalid continuation byte) and "\xE0\x80\x80" (overlong 3-byte sequence)
+    // Each broken sequence must emit exactly one MalformedUtf8EscapeSequence diagnostic
+    invalid_string_source: string = "\"\\xC2\\xFF\" \"\\xE0\\x80\\x80\""
+    lexed_string: pawser.LexedSourceFile = pawser.lexer_tokenize_source(invalid_string_source)
+    defer pawser.lexed_source_file_destroy(&lexed_string)
+
+    malformed_escape_count: int = 0
+    for diagnostic in lexed_string.diagnostics {
+        if diagnostic.code == .MalformedUtf8EscapeSequence {
+            malformed_escape_count += 1
+        }
+    }
+
+    testing.expect_value(test_context, malformed_escape_count, 2)
+}
+
+// Verifies that binary literals with invalid digits emit InvalidBinaryDigit without a redundant MalformedNumberLiteral diagnostic.
+@(test)
+literal_test_invalid_binary_digit_single_diagnostic :: proc(test_context: ^testing.T) {
+    source_code: string = "0b2 0b10_2"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    invalid_binary_count: int = 0
+    malformed_number_count: int = 0
+
+    for diagnostic in lexed_file.diagnostics {
+        if diagnostic.code == .InvalidBinaryDigit {
+            invalid_binary_count += 1
+        }
+        if diagnostic.code == .MalformedNumberLiteral {
+            malformed_number_count += 1
+        }
+    }
+
+    testing.expect_value(test_context, invalid_binary_count, 2)
+    testing.expect_value(test_context, malformed_number_count, 0)
+}
