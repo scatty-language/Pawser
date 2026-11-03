@@ -1081,6 +1081,12 @@ lexer_scan_escape_sequence :: proc(
         return 0, false
     }
 
+    // If backslash is followed immediately by a newline, leave current_byte_offset at the newline
+    if state.source_text[state.current_byte_offset] == '\n' ||
+       state.source_text[state.current_byte_offset] == '\r' {
+        return 0, false
+    }
+
     escape_kind: u8 = state.source_text[state.current_byte_offset]
     state.current_byte_offset += 1
 
@@ -1127,23 +1133,11 @@ lexer_scan_escape_sequence :: proc(
         }
 
         byte_value: u8 = u8(accumulated_value)
-        if in_character_literal {
-            if byte_value >= 0x80 {
-                lexer_record_diagnostic(
-                    state,
-                    .MalformedUtf8EscapeSequence,
-                    .Error,
-                    escape_start_offset,
-                    state.current_byte_offset - escape_start_offset,
-                    "Hexadecimal escape sequence produces malformed UTF-8 in character literal.",
-                )
-
-                return u32(byte_value), false
-            }
-
+        if byte_value < 0x80 {
             return u32(byte_value), true
-        } else {
-            if byte_value >= 0x80 {
+        }
+
+        // byte_value >= 0x80: multi-byte UTF-8 sequence via adjacent \xHH escapes
                 target_length: int = 0
                 if byte_value >= 0xC2 && byte_value <= 0xDF {
                     target_length = 2
@@ -1195,6 +1189,7 @@ lexer_scan_escape_sequence :: proc(
                 }
 
                 if !is_sequence_valid {
+            state.current_byte_offset = lookahead_offset
                     lexer_record_diagnostic(
                         state,
                         .MalformedUtf8EscapeSequence,
@@ -1209,11 +1204,25 @@ lexer_scan_escape_sequence :: proc(
 
                 state.current_byte_offset = lookahead_offset
 
-                return u32(byte_value), true
-            }
-
-            return u32(byte_value), true
+        decoded_code_point: u32 = 0
+        if target_length == 2 {
+            byte_0: u32 = u32(sequence_bytes[0] & 0x1F)
+            byte_1: u32 = u32(sequence_bytes[1] & 0x3F)
+            decoded_code_point = (byte_0 << 6) | byte_1
+        } else if target_length == 3 {
+            byte_0: u32 = u32(sequence_bytes[0] & 0x0F)
+            byte_1: u32 = u32(sequence_bytes[1] & 0x3F)
+            byte_2: u32 = u32(sequence_bytes[2] & 0x3F)
+            decoded_code_point = (byte_0 << 12) | (byte_1 << 6) | byte_2
+        } else if target_length == 4 {
+            byte_0: u32 = u32(sequence_bytes[0] & 0x07)
+            byte_1: u32 = u32(sequence_bytes[1] & 0x3F)
+            byte_2: u32 = u32(sequence_bytes[2] & 0x3F)
+            byte_3: u32 = u32(sequence_bytes[3] & 0x3F)
+            decoded_code_point = (byte_0 << 18) | (byte_1 << 12) | (byte_2 << 6) | byte_3
         }
+
+        return decoded_code_point, true
     case 'u':
         accumulated_value: u32 = 0
         digits_found: int = 0
@@ -1311,12 +1320,20 @@ lexer_scan_escape_sequence :: proc(
 
         return accumulated_value, true
     case:
+        escaped_byte_offset: int = escape_start_offset + 1
+        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, escaped_byte_offset)
+        advance_length: int = 1
+        if is_valid_utf8 && sequence_length > 1 {
+            advance_length = sequence_length
+        }
+        state.current_byte_offset = escaped_byte_offset + advance_length
+
         lexer_record_diagnostic(
             state,
             .InvalidEscapeSequence,
             .Error,
             escape_start_offset,
-            2,
+            state.current_byte_offset - escape_start_offset,
             "Unrecognized escape sequence.",
         )
 
