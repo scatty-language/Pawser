@@ -117,3 +117,51 @@ interpolation_test_escapes_and_diagnostics :: proc(test_context: ^testing.T) {
     testing.expect(test_context, len(lexed_empty.diagnostics) >= 1, "Expected EmptyStringInterpolation diagnostic")
     testing.expect_value(test_context, lexed_empty.diagnostics[0].code, pawser.LexerErrorCode.EmptyStringInterpolation)
 }
+
+// Verifies that an unterminated interpolated string emits InterpolatedStringEnd for the trailing segment and recovers at newline.
+@(test)
+interpolation_test_unterminated_trailing_segment_recovery :: proc(test_context: ^testing.T) {
+    source_code: string = "\"Hello \\(userName) trailing text\nnextIdentifier"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 1)
+    if len(lexed_file.diagnostics) >= 1 {
+        testing.expect_value(test_context, lexed_file.diagnostics[0].code, pawser.LexerErrorCode.UnterminatedStringLiteral)
+    }
+
+    // Tokens: InterpolatedStringStart, InterpolationStart, userName, InterpolationEnd, InterpolatedStringEnd, nextIdentifier, EOF
+    testing.expect_value(test_context, len(lexed_file.tokens), 7)
+
+    testing.expect_value(test_context, lexed_file.tokens[0].kind, pawser.TokenKind.InterpolatedStringStart)
+    testing.expect_value(test_context, lexed_file.tokens[1].kind, pawser.TokenKind.InterpolationStart)
+    testing.expect_value(test_context, lexed_file.tokens[2].kind, pawser.TokenKind.LocalIdentifier)
+    testing.expect_value(test_context, lexed_file.tokens[3].kind, pawser.TokenKind.InterpolationEnd)
+
+    // Trailing segment must not be dropped from token stream
+    testing.expect_value(test_context, lexed_file.tokens[4].kind, pawser.TokenKind.InterpolatedStringEnd)
+    testing.expect_value(test_context, pawser.token_extract_lexeme(lexed_file.tokens[4], source_code), " trailing text")
+
+    // Token on the next line must be scanned with PrecededByNewline
+    testing.expect_value(test_context, lexed_file.tokens[5].kind, pawser.TokenKind.LocalIdentifier)
+    testing.expect_value(test_context, pawser.token_extract_lexeme(lexed_file.tokens[5], source_code), "nextIdentifier")
+    testing.expect(test_context, pawser.TokenFlag.PrecededByNewline in lexed_file.tokens[5].flags, "Expected PrecededByNewline on nextIdentifier")
+}
+
+// Verifies that malformed UTF-8 hex escapes and incomplete escapes inside interpolated string segments are diagnosed cleanly.
+@(test)
+interpolation_test_malformed_escapes_in_segments :: proc(test_context: ^testing.T) {
+    source_code: string = "\"Start \\xFF \\(value) Middle \\u12\";"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 2)
+    if len(lexed_file.diagnostics) >= 2 {
+        testing.expect_value(test_context, lexed_file.diagnostics[0].code, pawser.LexerErrorCode.MalformedUtf8EscapeSequence)
+        testing.expect_value(test_context, lexed_file.diagnostics[1].code, pawser.LexerErrorCode.InvalidEscapeSequence)
+    }
+
+    // Closing quote and semicolon must remain intact
+    testing.expect_value(test_context, lexed_file.tokens[4].kind, pawser.TokenKind.InterpolatedStringEnd)
+    testing.expect_value(test_context, lexed_file.tokens[5].kind, pawser.TokenKind.Semicolon)
+}

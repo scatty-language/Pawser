@@ -71,3 +71,38 @@ utf8_test_invalid_byte_sequences :: proc(test_context: ^testing.T) {
     testing.expect_value(test_context, lexed_file.tokens[2].kind, pawser.TokenKind.LocalIdentifier)
     testing.expect_value(test_context, pawser.token_extract_lexeme(lexed_file.tokens[2], source_code), "beta")
 }
+
+// Verifies that malformed UTF-8 sequences inside escaped identifiers and at the tail of unclosed raw strings are diagnosed.
+@(test)
+utf8_test_invalid_bytes_in_escaped_identifier_and_raw_string_tail :: proc(test_context: ^testing.T) {
+    // Malformed UTF-8 inside backticks
+    escaped_source: string = "`\xFF`"
+    lexed_escaped: pawser.LexedSourceFile = pawser.lexer_tokenize_source(escaped_source)
+    defer pawser.lexed_source_file_destroy(&lexed_escaped)
+
+    found_utf8_error_in_escaped: bool = false
+    for diagnostic in lexed_escaped.diagnostics {
+        if diagnostic.code == .MalformedUtf8Sequence {
+            found_utf8_error_in_escaped = true
+        }
+    }
+    testing.expect(test_context, found_utf8_error_in_escaped, "Expected MalformedUtf8Sequence inside escaped identifier")
+
+    // Malformed UTF-8 in the final two bytes of an unclosed raw string
+    raw_tail_source: string = "\"\"\"unclosed\xFF"
+    lexed_raw_tail: pawser.LexedSourceFile = pawser.lexer_tokenize_source(raw_tail_source)
+    defer pawser.lexed_source_file_destroy(&lexed_raw_tail)
+
+    found_utf8_error_in_raw: bool = false
+    found_unterminated_raw: bool = false
+    for diagnostic in lexed_raw_tail.diagnostics {
+        if diagnostic.code == .MalformedUtf8Sequence {
+            found_utf8_error_in_raw = true
+        }
+        if diagnostic.code == .UnterminatedRawStringLiteral {
+            found_unterminated_raw = true
+        }
+    }
+    testing.expect(test_context, found_utf8_error_in_raw, "Expected MalformedUtf8Sequence in tail of unclosed raw string")
+    testing.expect(test_context, found_unterminated_raw, "Expected UnterminatedRawStringLiteral diagnostic")
+}

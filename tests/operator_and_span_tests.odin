@@ -1,6 +1,7 @@
 package tests
 
 import "core:testing"
+import "base:runtime"
 import pawser "../src"
 
 // Verifies that all compound operators, assignment variants, and compound keywords are correctly recognized.
@@ -120,4 +121,52 @@ Point with {
             testing.expect_value(test_context, partner.matching_delimiter_index, u32(token_index))
         }
     }
+}
+
+// Tracks invocations of a stateless custom allocator where `data` is nil.
+@(private = "file")
+stateless_allocator_invocation_count: int = 0
+
+// Custom allocator procedure that delegates to the default heap allocator while counting allocations.
+@(private = "file")
+stateless_counting_allocator_proc :: proc(
+    allocator_data: rawptr,
+    mode: runtime.Allocator_Mode,
+    size: int,
+    alignment: int,
+    old_memory: rawptr,
+    old_size: int,
+    location := #caller_location,
+) -> ([]byte, runtime.Allocator_Error) {
+    if mode == .Alloc || mode == .Alloc_Non_Zeroed || mode == .Resize || mode == .Resize_Non_Zeroed {
+        stateless_allocator_invocation_count += 1
+    }
+    default_alloc: runtime.Allocator = runtime.default_allocator()
+
+    return default_alloc.procedure(default_alloc.data, mode, size, alignment, old_memory, old_size, location)
+}
+
+// Verifies that LexerConfiguration respects custom allocators even when allocator.data is nil.
+@(test)
+span_test_stateless_custom_allocator :: proc(test_context: ^testing.T) {
+    stateless_allocator_invocation_count = 0
+
+    custom_allocator := runtime.Allocator{
+        procedure = stateless_counting_allocator_proc,
+        data      = nil,
+    }
+
+    source_code: string = "Value :: 100;"
+    configuration := pawser.LexerConfiguration{
+        allocator = custom_allocator,
+    }
+
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code, configuration)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect(
+        test_context,
+        stateless_allocator_invocation_count > 0,
+        "Lexer must use configuration.allocator when allocator.procedure != nil even if allocator.data == nil",
+    )
 }
