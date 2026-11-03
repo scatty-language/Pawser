@@ -1,7 +1,7 @@
 package tests
 
 import "core:testing"
-import pawser "../src"
+import pawser "../../src"
 
 // Verifies that integer literals in decimal, hexadecimal, and binary formats with suffixes are correctly tokenized.
 @(test)

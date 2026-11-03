@@ -1,7 +1,7 @@
 package tests
 
 import "core:testing"
-import pawser "../src"
+import pawser "../../src"
 
 // Verifies that canonical file paths with valid suffixes are recognized successfully.
 @(test)

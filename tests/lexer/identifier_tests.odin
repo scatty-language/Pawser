@@ -1,7 +1,7 @@
 package tests
 
 import "core:testing"
-import pawser "../src"
+import pawser "../../src"
 
 // Verifies that public, internal, private, and local identifiers are correctly categorized and hashed.
 @(test)

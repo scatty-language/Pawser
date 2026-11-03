@@ -1,7 +1,7 @@
 package tests
 
 import "core:testing"
-import pawser "../src"
+import pawser "../../src"
 
 // Verifies that basic string interpolation generates correct start, delimiter, expression, and end tokens.
 @(test)

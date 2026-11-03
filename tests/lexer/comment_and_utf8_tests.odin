@@ -1,7 +1,7 @@
 package tests
 
 import "core:testing"
-import pawser "../src"
+import pawser "../../src"
 
 // Verifies that line comments and arbitrarily nested block comments are stripped without breaking tokenization.
 @(test)

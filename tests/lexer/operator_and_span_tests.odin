@@ -2,7 +2,7 @@ package tests
 
 import "core:testing"
 import "base:runtime"
-import pawser "../src"
+import pawser "../../src"
 
 // Verifies that all compound operators, assignment variants, and compound keywords are correctly recognized.
 @(test)
