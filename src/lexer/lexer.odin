@@ -583,7 +583,21 @@ lexer_scan_escaped_keyword :: proc(state: ^LexerState) {
         if current_character == '\n' || current_character == '\r' {
             break
         }
+
+        sequence_length, is_valid_utf8 := utf8_validate_sequence(state.source_text, state.current_byte_offset)
+        if !is_valid_utf8 {
+            lexer_record_diagnostic(
+                state,
+                .MalformedUtf8Sequence,
+                .Error,
+                state.current_byte_offset,
+                1,
+                "Malformed UTF-8 sequence inside escaped identifier.",
+            )
         state.current_byte_offset += 1
+        } else {
+            state.current_byte_offset += sequence_length
+        }
     }
 
     if !found_closing_backtick {
