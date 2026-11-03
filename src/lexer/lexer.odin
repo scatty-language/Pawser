@@ -828,16 +828,11 @@ lexer_scan_number :: proc(state: ^LexerState) {
                     }
                     previous_was_underscore = true
                     state.current_byte_offset += 1
-                } else if (binary_character >= '2' && binary_character <= '9') ||
-                           (binary_character >= 'a' && binary_character <= 'z') ||
-                           (binary_character >= 'A' && binary_character <= 'Z') {
+                } else if binary_character >= '2' && binary_character <= '9' {
                     invalid_digit_start: int = state.current_byte_offset
                     for state.current_byte_offset < len(state.source_text) {
                         character_to_check: u8 = state.source_text[state.current_byte_offset]
-                        if (character_to_check >= '0' && character_to_check <= '9') ||
-                           (character_to_check >= 'a' && character_to_check <= 'z') ||
-                           (character_to_check >= 'A' && character_to_check <= 'Z') ||
-                           (character_to_check == '_') {
+                        if (character_to_check >= '0' && character_to_check <= '9') || character_to_check == '_' {
                             state.current_byte_offset += 1
                         } else {
                             break
@@ -886,6 +881,36 @@ lexer_scan_number :: proc(state: ^LexerState) {
                       state.source_text[state.current_byte_offset] == 'L' {
                 flags += {.IntegerSuffixLong}
                 state.current_byte_offset += 1
+            }
+
+            // Trailing invalid characters check
+            if state.current_byte_offset < len(state.source_text) {
+                trailing_character: u8 = state.source_text[state.current_byte_offset]
+                if (trailing_character >= 'a' && trailing_character <= 'z') ||
+                   (trailing_character >= 'A' && trailing_character <= 'Z') ||
+                   (trailing_character >= '0' && trailing_character <= '9') ||
+                   (trailing_character == '_') {
+                    invalid_suffix_start: int = state.current_byte_offset
+                    for state.current_byte_offset < len(state.source_text) {
+                        character_to_check: u8 = state.source_text[state.current_byte_offset]
+                        if (character_to_check >= 'a' && character_to_check <= 'z') ||
+                           (character_to_check >= 'A' && character_to_check <= 'Z') ||
+                           (character_to_check >= '0' && character_to_check <= '9') ||
+                           (character_to_check == '_') {
+                            state.current_byte_offset += 1
+                        } else {
+                            break
+                        }
+                    }
+                    lexer_record_diagnostic(
+                        state,
+                        .InvalidNumberSuffix,
+                        .Error,
+                        invalid_suffix_start,
+                        state.current_byte_offset - invalid_suffix_start,
+                        "Invalid number literal suffix.",
+                    )
+                }
             }
 
             lexer_emit_token(state, .IntegerLiteral, start_offset, state.current_byte_offset, flags)
