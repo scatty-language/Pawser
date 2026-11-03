@@ -960,7 +960,17 @@ lexer_scan_number :: proc(state: ^LexerState) {
     if state.current_byte_offset < len(state.source_text) {
         exponent_character: u8 = state.source_text[state.current_byte_offset]
         if exponent_character == 'e' || exponent_character == 'E' {
+            if !is_float {
+                lexer_record_diagnostic(
+                    state,
+                    .MalformedNumberLiteral,
+                    .Error,
+                    start_offset,
+                    state.current_byte_offset - start_offset,
+                    "Floating-point exponent requires decimal point.",
+                )
             is_float = true
+            }
             state.current_byte_offset += 1 // Consume e / E
             if state.current_byte_offset < len(state.source_text) {
                 sign_character: u8 = state.source_text[state.current_byte_offset]
