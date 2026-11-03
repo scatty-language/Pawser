@@ -1121,76 +1121,121 @@ lexer_scan_escape_sequence :: proc(
 
             return 0, false
         }
-        first_hex: u8 = state.source_text[state.current_byte_offset]
-        second_hex: u8 = state.source_text[state.current_byte_offset + 1]
-        state.current_byte_offset += 2
 
-        first_value: int = hex_digit_to_int(first_hex)
-        second_value: int = hex_digit_to_int(second_hex)
-
-        if first_value < 0 || second_value < 0 {
+        byte_value: u8 = u8(accumulated_value)
+        if in_character_literal {
+            if byte_value >= 0x80 {
             lexer_record_diagnostic(
                 state,
-                .InvalidEscapeSequence,
+                    .MalformedUtf8EscapeSequence,
                 .Error,
                 escape_start_offset,
-                4,
-                "Hexadecimal escape sequence requires valid hex digits.",
+                    state.current_byte_offset - escape_start_offset,
+                    "Hexadecimal escape sequence produces malformed UTF-8 in character literal.",
             )
 
-            return 0, false
+                return u32(byte_value), false
         }
 
-        byte_value: u32 = u32((first_value << 4) | second_value)
-        if in_character_literal && byte_value >= 0x80 {
+            return u32(byte_value), true
+        } else {
+            if byte_value >= 0x80 {
+                target_length: int = 0
+                if byte_value >= 0xC2 && byte_value <= 0xDF {
+                    target_length = 2
+                } else if byte_value >= 0xE0 && byte_value <= 0xEF {
+                    target_length = 3
+                } else if byte_value >= 0xF0 && byte_value <= 0xF4 {
+                    target_length = 4
+                }
+
+                if target_length == 0 {
             lexer_record_diagnostic(
                 state,
                 .MalformedUtf8EscapeSequence,
                 .Error,
                 escape_start_offset,
-                4,
+                        state.current_byte_offset - escape_start_offset,
                 "Hexadecimal escape sequence produces malformed UTF-8.",
             )
 
-            return byte_value, false
+                    return u32(byte_value), false
         }
 
-        return byte_value, true
-    case 'u':
-        // Exactly 4 hex digits
-        if state.current_byte_offset + 4 > len(state.source_text) {
+                sequence_bytes: [4]u8
+                sequence_bytes[0] = byte_value
+                consecutive_count: int = 1
+                lookahead_offset: int = state.current_byte_offset
+
+                for consecutive_count < target_length {
+                    if lookahead_offset + 3 < len(state.source_text) &&
+                       state.source_text[lookahead_offset] == '\\' &&
+                       state.source_text[lookahead_offset + 1] == 'x' {
+                        first_digit: int = hex_digit_to_int(state.source_text[lookahead_offset + 2])
+                        second_digit: int = hex_digit_to_int(state.source_text[lookahead_offset + 3])
+                        if first_digit >= 0 && second_digit >= 0 {
+                            next_byte: u8 = u8((first_digit << 4) | second_digit)
+                            sequence_bytes[consecutive_count] = next_byte
+                            consecutive_count += 1
+                            lookahead_offset += 4
+                            continue
+                        }
+                    }
+                    break
+                }
+
+                is_sequence_valid: bool = false
+                if consecutive_count == target_length {
+                    slice_as_string: string = string(sequence_bytes[:target_length])
+                    _, is_sequence_valid = utf8_validate_sequence(slice_as_string, 0)
+                }
+
+                if !is_sequence_valid {
             lexer_record_diagnostic(
                 state,
-                .InvalidEscapeSequence,
+                        .MalformedUtf8EscapeSequence,
                 .Error,
                 escape_start_offset,
                 state.current_byte_offset - escape_start_offset,
-                "Unicode escape sequence requires 4 hex digits.",
+                        "Hexadecimal escape sequence produces malformed UTF-8.",
             )
 
-            return 0, false
+                    return u32(byte_value), false
         }
 
+                state.current_byte_offset = lookahead_offset
+
+                return u32(byte_value), true
+            }
+
+            return u32(byte_value), true
+        }
+    case 'u':
         accumulated_value: u32 = 0
-        for hex_index in 0 ..< 4 {
-            hex_character: u8 = state.source_text[state.current_byte_offset + hex_index]
-            digit_value: int = hex_digit_to_int(hex_character)
+        digits_found: int = 0
+        for digits_found < 4 && state.current_byte_offset < len(state.source_text) {
+            current_character: u8 = state.source_text[state.current_byte_offset]
+            digit_value: int = hex_digit_to_int(current_character)
             if digit_value < 0 {
-                state.current_byte_offset += 4
+                break
+            }
+            accumulated_value = (accumulated_value << 4) | u32(digit_value)
+            digits_found += 1
+            state.current_byte_offset += 1
+        }
+
+        if digits_found < 4 {
                 lexer_record_diagnostic(
                     state,
                     .InvalidEscapeSequence,
                     .Error,
                     escape_start_offset,
-                    6,
-                    "Unicode escape sequence requires valid hex digits.",
+                state.current_byte_offset - escape_start_offset,
+                "Unicode escape sequence requires 4 hex digits.",
                 )
 
                 return 0, false
             }
-            accumulated_value = (accumulated_value << 4) | u32(digit_value)
-        }
-        state.current_byte_offset += 4
 
         // Check surrogate range
         if accumulated_value >= 0xD800 && accumulated_value <= 0xDFFF {
@@ -1199,7 +1244,7 @@ lexer_scan_escape_sequence :: proc(
                 .SurrogateUnicodeEscape,
                 .Error,
                 escape_start_offset,
-                6,
+                state.current_byte_offset - escape_start_offset,
                 "Unicode escape sequence must not specify surrogate code points.",
             )
 
@@ -1208,8 +1253,20 @@ lexer_scan_escape_sequence :: proc(
 
         return accumulated_value, true
     case 'U':
-        // Exactly 8 hex digits
-        if state.current_byte_offset + 8 > len(state.source_text) {
+        accumulated_value: u32 = 0
+        digits_found: int = 0
+        for digits_found < 8 && state.current_byte_offset < len(state.source_text) {
+            current_character: u8 = state.source_text[state.current_byte_offset]
+            digit_value: int = hex_digit_to_int(current_character)
+            if digit_value < 0 {
+                break
+            }
+            accumulated_value = (accumulated_value << 4) | u32(digit_value)
+            digits_found += 1
+            state.current_byte_offset += 1
+        }
+
+        if digits_found < 8 {
             lexer_record_diagnostic(
                 state,
                 .InvalidEscapeSequence,
@@ -1222,34 +1279,13 @@ lexer_scan_escape_sequence :: proc(
             return 0, false
         }
 
-        accumulated_value: u32 = 0
-        for hex_index in 0 ..< 8 {
-            hex_character: u8 = state.source_text[state.current_byte_offset + hex_index]
-            digit_value: int = hex_digit_to_int(hex_character)
-            if digit_value < 0 {
-                state.current_byte_offset += 8
-                lexer_record_diagnostic(
-                    state,
-                    .InvalidEscapeSequence,
-                    .Error,
-                    escape_start_offset,
-                    10,
-                    "Unicode escape sequence requires valid hex digits.",
-                )
-
-                return 0, false
-            }
-            accumulated_value = (accumulated_value << 4) | u32(digit_value)
-        }
-        state.current_byte_offset += 8
-
         if accumulated_value > 0x10FFFF {
             lexer_record_diagnostic(
                 state,
                 .OutOfRangeUnicodeEscape,
                 .Error,
                 escape_start_offset,
-                10,
+                state.current_byte_offset - escape_start_offset,
                 "Unicode escape sequence exceeds maximum code point U+10FFFF.",
             )
 
@@ -1262,7 +1298,7 @@ lexer_scan_escape_sequence :: proc(
                 .SurrogateUnicodeEscape,
                 .Error,
                 escape_start_offset,
-                10,
+                state.current_byte_offset - escape_start_offset,
                 "Unicode escape sequence must not specify surrogate code points.",
             )
 
