@@ -106,3 +106,18 @@ utf8_test_invalid_bytes_in_escaped_identifier_and_raw_string_tail :: proc(test_c
     testing.expect(test_context, found_utf8_error_in_raw, "Expected MalformedUtf8Sequence in tail of unclosed raw string")
     testing.expect(test_context, found_unterminated_raw, "Expected UnterminatedRawStringLiteral diagnostic")
 }
+
+// Verifies that comment delimiters inside standard, character, and raw string literals remain literal content.
+@(test)
+comment_test_delimiters_inside_literals :: proc(test_context: ^testing.T) {
+    source_code: string = `"//" "/* outer /* nested */ */" '/' """// /* */"""`
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 0)
+    testing.expect_value(test_context, len(lexed_file.tokens), 5)
+    testing.expect_value(test_context, lexed_file.tokens[0].kind, pawser.TokenKind.StringLiteral)
+    testing.expect_value(test_context, lexed_file.tokens[1].kind, pawser.TokenKind.StringLiteral)
+    testing.expect_value(test_context, lexed_file.tokens[2].kind, pawser.TokenKind.CharacterLiteral)
+    testing.expect_value(test_context, lexed_file.tokens[3].kind, pawser.TokenKind.RawStringLiteral)
+}

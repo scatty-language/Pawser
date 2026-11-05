@@ -464,3 +464,86 @@ literal_test_invalid_binary_digit_single_diagnostic :: proc(test_context: ^testi
     testing.expect_value(test_context, invalid_binary_count, 2)
     testing.expect_value(test_context, malformed_number_count, 0)
 }
+
+// Verifies that every simple escape and mixed-case numeric escape is accepted in strings and character literals.
+@(test)
+literal_test_all_valid_escape_sequences :: proc(test_context: ^testing.T) {
+    source_code: string = `"\n\r\t\\\"\'\0 \x7F \u00af \U0001F525 \U0010FFFF" '\n' '\r' '\t' '\\' '\"' '\'' '\0'`
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 0)
+    testing.expect_value(test_context, len(lexed_file.tokens), 9)
+    testing.expect_value(test_context, lexed_file.tokens[0].kind, pawser.TokenKind.StringLiteral)
+    for token_index in 0 ..< 8 {
+        testing.expect(
+            test_context,
+            pawser.TokenFlag.HasEscapeSequences in lexed_file.tokens[token_index].flags,
+            "Expected escape metadata on literal token",
+        )
+    }
+    for token_index in 1 ..< 8 {
+        testing.expect_value(test_context, lexed_file.tokens[token_index].kind, pawser.TokenKind.CharacterLiteral)
+    }
+}
+
+// Verifies that Unicode escapes reject values above U+10FFFF and surrogate code points in the eight-digit form.
+@(test)
+literal_test_unicode_escape_boundaries :: proc(test_context: ^testing.T) {
+    source_code: string = `"\U00110000" "\U0000DFFF"`
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 2)
+    testing.expect_value(test_context, lexed_file.diagnostics[0].code, pawser.LexerErrorCode.OutOfRangeUnicodeEscape)
+    testing.expect_value(test_context, lexed_file.diagnostics[1].code, pawser.LexerErrorCode.SurrogateUnicodeEscape)
+    testing.expect_value(test_context, len(lexed_file.tokens), 3)
+}
+
+// Verifies that malformed prefixes, separators, exponents, and suffixes produce the corresponding diagnostics.
+@(test)
+literal_test_malformed_numeric_forms :: proc(test_context: ^testing.T) {
+    source_code: string = "0x 0XFF 0B10 1_ 0x_FF 0b_10 1.0e+ 1.0e 1.0u"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    invalid_prefix_count: int = 0
+    malformed_number_count: int = 0
+    invalid_suffix_count: int = 0
+    for diagnostic in lexed_file.diagnostics {
+        if diagnostic.code == .InvalidNumberPrefix {
+            invalid_prefix_count += 1
+        }
+        if diagnostic.code == .MalformedNumberLiteral {
+            malformed_number_count += 1
+        }
+        if diagnostic.code == .InvalidNumberSuffix {
+            invalid_suffix_count += 1
+        }
+    }
+
+    testing.expect_value(test_context, invalid_prefix_count, 2)
+    testing.expect_value(test_context, malformed_number_count, 6)
+    testing.expect_value(test_context, invalid_suffix_count, 1)
+    testing.expect_value(test_context, len(lexed_file.tokens), 10)
+}
+
+// Verifies that unterminated standard strings and character literals are diagnosed at end of file.
+@(test)
+literal_test_unterminated_literals_at_end_of_file :: proc(test_context: ^testing.T) {
+    string_source: string = `"unterminated`
+    lexed_string: pawser.LexedSourceFile = pawser.lexer_tokenize_source(string_source)
+    defer pawser.lexed_source_file_destroy(&lexed_string)
+
+    testing.expect_value(test_context, len(lexed_string.diagnostics), 1)
+    testing.expect_value(test_context, lexed_string.diagnostics[0].code, pawser.LexerErrorCode.UnterminatedStringLiteral)
+    testing.expect_value(test_context, lexed_string.tokens[0].kind, pawser.TokenKind.StringLiteral)
+
+    character_source: string = `'x`
+    lexed_character: pawser.LexedSourceFile = pawser.lexer_tokenize_source(character_source)
+    defer pawser.lexed_source_file_destroy(&lexed_character)
+
+    testing.expect_value(test_context, len(lexed_character.diagnostics), 1)
+    testing.expect_value(test_context, lexed_character.diagnostics[0].code, pawser.LexerErrorCode.UnterminatedCharacterLiteral)
+    testing.expect_value(test_context, lexed_character.tokens[0].kind, pawser.TokenKind.CharacterLiteral)
+}

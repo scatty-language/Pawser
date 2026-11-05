@@ -170,3 +170,52 @@ span_test_stateless_custom_allocator :: proc(test_context: ^testing.T) {
         "Lexer must use configuration.allocator when allocator.procedure != nil even if allocator.data == nil",
     )
 }
+
+// Verifies that all delimiters, punctuation, and non-guarded operators map to distinct token kinds.
+@(test)
+operator_test_basic_operators_and_punctuation :: proc(test_context: ^testing.T) {
+    source_code: string = "( ) { } [ ] , ; : @ ^ ~ . ? ! = + - * / % == != < <= > >= += -= *= /= %="
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    expected_kinds := []pawser.TokenKind{
+        .LeftParenthesis,
+        .RightParenthesis,
+        .LeftBrace,
+        .RightBrace,
+        .LeftBracket,
+        .RightBracket,
+        .Comma,
+        .Semicolon,
+        .Colon,
+        .At,
+        .Caret,
+        .Tilde,
+        .Dot,
+        .Question,
+        .Exclamation,
+        .Assign,
+        .Plus,
+        .Minus,
+        .Star,
+        .Slash,
+        .Percent,
+        .Equal,
+        .NotEqual,
+        .Less,
+        .LessEqual,
+        .Greater,
+        .GreaterEqual,
+        .PlusAssign,
+        .MinusAssign,
+        .StarAssign,
+        .SlashAssign,
+        .PercentAssign,
+    }
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 0)
+    testing.expect_value(test_context, len(lexed_file.tokens), len(expected_kinds) + 1)
+    for expected_index in 0 ..< len(expected_kinds) {
+        testing.expect_value(test_context, lexed_file.tokens[expected_index].kind, expected_kinds[expected_index])
+    }
+}

@@ -162,3 +162,106 @@ source_file_test_malformed_identifier_base_names :: proc(test_context: ^testing.
         testing.expect(test_context, len(metadata.diagnostics) >= 1, "Expected diagnostic for malformed file base name")
     }
 }
+
+// Verifies that every built-in conditional suffix and multiple custom flags are accepted in canonical order.
+@(test)
+source_file_test_all_built_in_suffixes_and_multiple_custom_flags :: proc(test_context: ^testing.T) {
+    built_in_paths := []string{
+        "Console.debug.cat",
+        "Console.release.cat",
+        "Console.windows.cat",
+        "Console.linux.cat",
+        "Console.macos.cat",
+        "Console.ios.cat",
+        "Console.android.cat",
+        "Console.freebsd.cat",
+        "Console.wasm.cat",
+        "Console.amd64.cat",
+        "Console.arm64.cat",
+        "Console.x86.cat",
+        "Console.arm.cat",
+        "Console.riscv64.cat",
+        "Console.wasm32.cat",
+    }
+
+    for file_path in built_in_paths {
+        metadata: pawser.SourceFileMetadata = pawser.source_file_validate_path(file_path)
+        defer pawser.source_file_metadata_destroy(&metadata)
+
+        testing.expect(test_context, metadata.is_valid, "Expected built-in conditional suffix to be accepted")
+        testing.expect_value(test_context, len(metadata.diagnostics), 0)
+    }
+
+    allowed_flags := []string{"vulkan", "opengl"}
+    metadata: pawser.SourceFileMetadata = pawser.source_file_validate_path(
+        "Renderer.vulkan.opengl.release.linux.riscv64.cat",
+        allowed_flags,
+    )
+    defer pawser.source_file_metadata_destroy(&metadata)
+
+    testing.expect(test_context, metadata.is_valid, "Expected multiple custom flags in canonical order")
+    testing.expect_value(test_context, len(metadata.custom_flags), 2)
+    testing.expect_value(test_context, metadata.custom_flags[0], "vulkan")
+    testing.expect_value(test_context, metadata.custom_flags[1], "opengl")
+}
+
+// Verifies that an empty base name and a case-mismatched extension are rejected.
+@(test)
+source_file_test_empty_base_name_and_extension_case :: proc(test_context: ^testing.T) {
+    metadata_empty: pawser.SourceFileMetadata = pawser.source_file_validate_path(".cat")
+    defer pawser.source_file_metadata_destroy(&metadata_empty)
+
+    testing.expect(test_context, !metadata_empty.is_valid, "Expected empty base name to be rejected")
+    testing.expect_value(test_context, metadata_empty.diagnostics[0].code, pawser.LexerErrorCode.EmptyFileBaseName)
+
+    metadata_extension: pawser.SourceFileMetadata = pawser.source_file_validate_path("Console.CAT")
+    defer pawser.source_file_metadata_destroy(&metadata_extension)
+
+    testing.expect(test_context, !metadata_extension.is_valid, "Expected extension matching to be case-sensitive")
+    testing.expect_value(test_context, metadata_extension.diagnostics[0].code, pawser.LexerErrorCode.InvalidFileExtension)
+}
+
+// Verifies that spaces, tabs, LF, CRLF, and standalone CR separate tokens and update source coordinates.
+@(test)
+source_file_test_whitespace_and_line_terminators :: proc(test_context: ^testing.T) {
+    source_code: string = "first\tsecond third\rfourth\nfifth\r\nsixth"
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source(source_code)
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 0)
+    testing.expect_value(test_context, len(lexed_file.tokens), 7)
+    testing.expect_value(test_context, len(lexed_file.line_start_offsets), 4)
+
+    for token_index in 1 ..< 6 {
+        testing.expect(
+            test_context,
+            pawser.TokenFlag.PrecededByWhitespace in lexed_file.tokens[token_index].flags,
+            "Expected whitespace flag after a separator",
+        )
+    }
+    for token_index in 3 ..< 6 {
+        testing.expect(
+            test_context,
+            pawser.TokenFlag.PrecededByNewline in lexed_file.tokens[token_index].flags,
+            "Expected newline flag after a line terminator",
+        )
+        position: pawser.LineColumn = pawser.lexed_source_file_compute_line_column(
+            &lexed_file,
+            lexed_file.tokens[token_index].span.byte_offset,
+        )
+        testing.expect_value(test_context, position.line, u32(token_index - 1))
+        testing.expect_value(test_context, position.column, 1)
+    }
+}
+
+// Verifies that an empty source file produces only an end-of-file token without diagnostics.
+@(test)
+source_file_test_empty_source :: proc(test_context: ^testing.T) {
+    lexed_file: pawser.LexedSourceFile = pawser.lexer_tokenize_source("")
+    defer pawser.lexed_source_file_destroy(&lexed_file)
+
+    testing.expect_value(test_context, len(lexed_file.diagnostics), 0)
+    testing.expect_value(test_context, len(lexed_file.tokens), 1)
+    testing.expect_value(test_context, lexed_file.tokens[0].kind, pawser.TokenKind.EndOfFile)
+    testing.expect_value(test_context, len(lexed_file.line_start_offsets), 1)
+}

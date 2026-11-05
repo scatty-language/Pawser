@@ -249,3 +249,24 @@ interpolation_test_mismatched_delimiter_depth_sync :: proc(test_context: ^testin
     testing.expect(test_context, found_string_end, "Expected closing quote to be recognized as InterpolatedStringEnd")
     testing.expect_value(test_context, lexed_file.tokens[len(lexed_file.tokens) - 2].kind, pawser.TokenKind.Semicolon)
 }
+
+// Verifies that interpolation delimiters are not activated inside character or raw string literals.
+@(test)
+interpolation_test_delimiter_outside_standard_strings :: proc(test_context: ^testing.T) {
+    character_source: string = `'\('`
+    lexed_character: pawser.LexedSourceFile = pawser.lexer_tokenize_source(character_source)
+    defer pawser.lexed_source_file_destroy(&lexed_character)
+
+    testing.expect_value(test_context, len(lexed_character.diagnostics), 1)
+    testing.expect_value(test_context, lexed_character.diagnostics[0].code, pawser.LexerErrorCode.InvalidEscapeSequence)
+    testing.expect_value(test_context, lexed_character.tokens[0].kind, pawser.TokenKind.CharacterLiteral)
+
+    raw_source: string = `"""\(not interpolation)"""`
+    lexed_raw: pawser.LexedSourceFile = pawser.lexer_tokenize_source(raw_source)
+    defer pawser.lexed_source_file_destroy(&lexed_raw)
+
+    testing.expect_value(test_context, len(lexed_raw.diagnostics), 0)
+    testing.expect_value(test_context, len(lexed_raw.tokens), 2)
+    testing.expect_value(test_context, lexed_raw.tokens[0].kind, pawser.TokenKind.RawStringLiteral)
+    testing.expect_value(test_context, pawser.token_extract_lexeme(lexed_raw.tokens[0], raw_source), raw_source)
+}
