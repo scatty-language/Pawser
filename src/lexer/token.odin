@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
 package lexer
 
 // Sentinel index indicating that a `Token` does not have a paired delimiter.

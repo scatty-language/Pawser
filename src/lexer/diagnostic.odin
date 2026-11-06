@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
 package lexer
 
 // Severity classification of a lexical or source file diagnostic.

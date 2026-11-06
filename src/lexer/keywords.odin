@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
 package lexer
 
 // Computes a 64-bit FNV-1a hash value for the provided string slice.
